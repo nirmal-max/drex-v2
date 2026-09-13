@@ -28,6 +28,8 @@ from recovery_backends import (
 from fragment_engine import FragmentReassembler, JpegEntropyDecoder, ZipCarveStream
 from carver_engine import DeepCarverEngine, EvidenceScores
 from fs_bitmap import NtfsBitmapAnalyzer, BitmapScanPolicy
+from validators import FormatRegistry, ValidationResult, CandidateState
+
 
 
 class TargetKind(str, Enum):
@@ -1359,3 +1361,251 @@ class RecoveryDispatcher:
     def status(self, method_id: str) -> tuple[str, str]:
         adapter = self.get(method_id)
         return adapter.status()
+
+
+@dataclass(frozen=True)
+class RecoveredArtifactRecord:
+    """Forensic record of an individual artifact recovered by a mature backend."""
+    artifact_path: Path
+    filename: str
+    size_bytes: int
+    sha256: str
+    backend: str
+    execution_type: str  # "REAL"
+    format_identified: str
+    is_drex_validated: bool
+    validation_state: str  # "INDEPENDENTLY VALIDATED BY DREX", "CORRUPTED_INCOMPLETE", "UNSUPPORTED"
+    evidence_score: float
+    limitations: tuple[str, ...]
+    vault_object_id: str | None = None
+    audit_event_id: str | None = None
+
+
+@dataclass(frozen=True)
+class BackendRecoveryExecution:
+    """Complete forensic provenance record of a mature recovery backend run."""
+    backend_id: str
+    backend_name: str
+    backend_version: str
+    source_path: str
+    source_sha256_before: str
+    source_sha256_after: str
+    source_size_before: int
+    source_size_after: int
+    source_immutable: bool
+    destination_path: Path
+    command: tuple[str, ...]
+    exit_code: int
+    start_time: str
+    end_time: str
+    duration_seconds: float
+    artifacts: tuple[RecoveredArtifactRecord, ...]
+    success: bool
+    error_message: str | None = None
+
+
+class MatureBackendOrchestrator:
+    """Layered Orchestrator: Dispatches recovery to tested external engines and subjects
+    every recovered artifact to DREX's independent structural validation and forensic vault pipeline.
+    """
+
+    def __init__(self, root: Path | None = None, meipass: Path | None = None):
+        self.root = root or Path(".")
+        self.meipass = meipass
+
+    def validate_safety(self, source: str | Path, destination: Path) -> None:
+        """Enforce strict read-only target validation and destination path isolation."""
+        src_str = str(source)
+        if not src_str:
+            raise RecoveryError("Source path cannot be empty.")
+        if not src_str.startswith("\\\\.\\"):
+            src_path = Path(src_str).resolve()
+            if not src_path.exists():
+                raise RecoveryError(f"Recovery source '{source}' does not exist.")
+            if not src_path.is_file() and not src_path.is_dir():
+                raise RecoveryError(f"Recovery source '{source}' is not a valid file or directory.")
+            dest_path = destination.resolve()
+            if dest_path == src_path:
+                raise RecoveryError("Destination cannot be identical to the source path.")
+            if src_path in dest_path.parents:
+                raise RecoveryError("Destination directory cannot reside inside the source path tree.")
+            if dest_path in src_path.parents:
+                raise RecoveryError("Source path cannot reside inside the recovery destination.")
+
+    @staticmethod
+    def compute_file_hash_and_size(path: Path | str) -> tuple[str, int]:
+        p = Path(path)
+        if not p.is_file():
+            return "", 0
+        h = hashlib.sha256()
+        total_size = 0
+        with open(p, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+                total_size += len(chunk)
+        return h.hexdigest().upper(), total_size
+
+    @staticmethod
+    def identify_format(data: bytes, filename: str = "") -> str:
+        """Identify file format using header magic bytes and filename extensions."""
+        for fid, sig in FormatRegistry.get_all_signatures():
+            if data.startswith(sig):
+                return fid
+        suffix = Path(filename).suffix.lstrip(".").upper()
+        mapping = {
+            "JPG": "JPEG", "JPEG": "JPEG",
+            "PNG": "PNG", "PDF": "PDF",
+            "ZIP": "ZIP", "DOCX": "OOXML", "XLSX": "OOXML", "PPTX": "OOXML",
+            "SQLITE": "SQLITE", "DB": "SQLITE", "SQLITE3": "SQLITE",
+            "MP4": "MP4", "MOV": "MP4",
+            "WAV": "RIFF", "AVI": "RIFF", "RIFF": "RIFF",
+            "MP3": "MP3", "BMP": "BMP", "GIF": "GIF",
+            "RAR": "RAR", "7Z": "SEVENZIP",
+            "EXE": "PE", "DLL": "PE", "SYS": "PE",
+        }
+        return mapping.get(suffix, "UNKNOWN")
+
+    def identify_with_fidentify(self, target: str | Path) -> list[dict[str, str]]:
+        """Query official PhotoRec fidentify utility for file format identification."""
+        photorec_exe = find_backend_executable("photorec", self.root, self.meipass)
+        if photorec_exe is None:
+            return []
+        fidentify_bin = photorec_exe.parent / "fidentify_win.exe"
+        if not fidentify_bin.is_file():
+            fidentify_bin = photorec_exe.parent / "fidentify.exe"
+        if not fidentify_bin.is_file():
+            return []
+        from backend_adapters import build_fidentify_command, parse_fidentify_output, CentralProcessRunner
+        cmd = build_fidentify_command(fidentify_bin, str(target))
+        res = CentralProcessRunner.run(cmd, timeout=30, cwd=tempfile.gettempdir())
+        if res.exit_code == 0 and res.stdout:
+            return parse_fidentify_output(res.stdout)
+        return []
+
+    def recover_with_tsk(
+        self,
+        source_image: str | Path,
+        destination: Path,
+        *,
+        all_files: bool = True,
+        fs_offset: int | None = None,
+        vault=None,
+        case=None,
+        case_mgr=None,
+        timeout: int = 86400,
+    ) -> BackendRecoveryExecution:
+        """Execute The Sleuth Kit tsk_recover and independently validate all recovered artifacts."""
+        self.validate_safety(source_image, destination)
+        src_str = str(source_image)
+        src_path = Path(src_str)
+
+        tsk_rec_exe = find_backend_executable("tsk", self.root, self.meipass)
+        if tsk_rec_exe is None:
+            raise RecoveryError("The Sleuth Kit (TSK) executables not found in native_bin or PATH.")
+        rec_binary = tsk_rec_exe.parent / "tsk_recover.exe"
+        if not rec_binary.is_file():
+            rec_binary = tsk_rec_exe
+
+        # Source immutability BEFORE
+        src_hash_before, src_size_before = self.compute_file_hash_and_size(src_path)
+        start_time_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        t0 = time.time()
+
+        destination.mkdir(parents=True, exist_ok=True)
+        from backend_adapters import build_tsk_recover_command, CentralProcessRunner
+        cmd = build_tsk_recover_command(rec_binary, src_str, str(destination), all_files=all_files, fs_offset=fs_offset)
+        res = CentralProcessRunner.run(cmd, timeout=timeout)
+        duration = time.time() - t0
+        end_time_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        # Source immutability AFTER
+        src_hash_after, src_size_after = self.compute_file_hash_and_size(src_path)
+        immutable = (src_hash_before == src_hash_after) and (src_size_before == src_size_after)
+
+        # Enumerate and independently validate recovered artifacts
+        recovered_files = [p for p in destination.rglob("*") if p.is_file()]
+        artifact_records: list[RecoveredArtifactRecord] = []
+
+        for fpath in recovered_files:
+            fdata = fpath.read_bytes()
+            fsha = hashlib.sha256(fdata).hexdigest().upper()
+            fmt = self.identify_format(fdata, fpath.name)
+
+            # Independent DREX validation
+            val_res = FormatRegistry.validate_buffer(fmt, fdata)
+            if val_res.is_valid:
+                vstate = "INDEPENDENTLY VALIDATED BY DREX"
+                score = val_res.evidence.overall_confidence if hasattr(val_res.evidence, "overall_confidence") else 0.95
+            elif fmt == "UNKNOWN":
+                vstate = "RAW_UNVALIDATED"
+                score = 0.50
+            else:
+                vstate = f"VALIDATOR_{val_res.state.name}" if hasattr(val_res.state, "name") else "VALIDATOR_REJECTED"
+                score = 0.0
+
+            vault_obj_id = None
+            audit_evt_id = None
+            if vault is not None and case is not None:
+                try:
+                    from forensic_vault import VaultObjectType, TimelineEventType
+                    vobj = vault.store_file(
+                        case_id=case.case_id,
+                        source_path=fpath,
+                        object_type=VaultObjectType.RECOVERED,
+                        destination_name=fpath.name,
+                        metadata={"backend": "The Sleuth Kit 4.15.0 (tsk_recover.exe)", "format": fmt, "validation_state": vstate, "sha256": fsha},
+                    )
+                    vault_obj_id = vobj.object_id
+                    if case_mgr is not None:
+                        _, aud_evt = case_mgr.record_recovery_event(
+                            case_id=case.case_id,
+                            operation_id=f"OP-TSK-REC-{fsha[:8]}",
+                            evidence_id=str(source_image),
+                            actor="DREX_TSK_RECOVERY_ORCHESTRATOR",
+                            event_type=TimelineEventType.RECOVERY_COMPLETED,
+                            description=f"Recovered {fpath.name} via TSK 4.15.0; validated: {vstate}",
+                            metadata={"vault_object_id": vault_obj_id, "sha256": fsha, "format": fmt},
+                        )
+                        audit_evt_id = aud_evt.event_id
+                except Exception:
+                    pass
+
+            artifact_records.append(
+                RecoveredArtifactRecord(
+                    artifact_path=fpath,
+                    filename=fpath.name,
+                    size_bytes=len(fdata),
+                    sha256=fsha,
+                    backend="The Sleuth Kit 4.15.0 (tsk_recover)",
+                    execution_type="REAL",
+                    format_identified=fmt,
+                    is_drex_validated=val_res.is_valid,
+                    validation_state=vstate,
+                    evidence_score=score,
+                    limitations=tuple(val_res.limitations),
+                    vault_object_id=vault_obj_id,
+                    audit_event_id=audit_evt_id,
+                )
+            )
+
+        return BackendRecoveryExecution(
+            backend_id="tsk",
+            backend_name="The Sleuth Kit",
+            backend_version="4.15.0",
+            source_path=src_str,
+            source_sha256_before=src_hash_before,
+            source_sha256_after=src_hash_after,
+            source_size_before=src_size_before,
+            source_size_after=src_size_after,
+            source_immutable=immutable,
+            destination_path=destination,
+            command=tuple(cmd),
+            exit_code=res.exit_code,
+            start_time=start_time_iso,
+            end_time=end_time_iso,
+            duration_seconds=duration,
+            artifacts=tuple(artifact_records),
+            success=(res.exit_code == 0 or len(artifact_records) > 0),
+            error_message=res.stderr if res.exit_code != 0 and not artifact_records else None,
+        )
+

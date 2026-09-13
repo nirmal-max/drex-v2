@@ -298,6 +298,33 @@ def build_photorec_command(photorec_exe: Path, image: str, output_dir: str, *,
     return cmd
 
 
+def build_fidentify_command(fidentify_exe: Path, target: str, *,
+                            check_extension: bool = False,
+                            file_format: str | None = None) -> list[str]:
+    """Build an fidentify command line using verified PhotoRec fidentify syntax."""
+    cmd = [str(fidentify_exe)]
+    if check_extension:
+        cmd.append("--check")
+    if file_format:
+        cmd.append(f"+{file_format}")
+    cmd.append(target)
+    return cmd
+
+
+def parse_fidentify_output(stdout: str) -> list[dict[str, str]]:
+    """Parse fidentify output lines (e.g. 'path/to/file.jpg: jpg')."""
+    results: list[dict[str, str]] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        path_part, format_part = line.rsplit(":", 1)
+        format_str = format_part.strip()
+        if format_str and not format_str.startswith("unknown"):
+            results.append({"path": path_part.strip(), "format": format_str})
+    return results
+
+
 # ─── ddrescue ────────────────────────────────────────────────────────
 # Upstream: ddrescue [options] infile outfile [mapfile]
 #

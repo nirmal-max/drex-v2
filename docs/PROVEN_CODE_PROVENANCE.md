@@ -1,8 +1,8 @@
 # DREX-V2 Proven-Code Provenance Register
 
-**Version:** DREX-V2 Phase 3 Hardened  
+**Version:** DREX-V2 Phase 4 Hardened  
 **Standard:** Strict Open-Source Provenance & Forensic Traceability  
-**Total Registered Components:** 9 Components (`PROV-001` through `PROV-009`)  
+**Total Registered Components:** 11 Components (`PROV-001` through `PROV-011`)  
 **Overall Licensing Status:** **ALL SOURCES COMPATIBLE / NON-BLOCKING**
 
 ---
@@ -173,3 +173,36 @@
 - **Reason for Reuse:** Provides an independent forensic baseline to verify DREX native recovery results against industry-standard tools without code pollution.
 - **Dependencies:** Optional external CLI binaries.
 - **Validation Evidence:** `tests/test_fs_differential.py`.
+
+---
+
+### PROV-010: PhotoRec Format Identification & File Signature Engine
+- **Source Project:** TestDisk & PhotoRec
+- **Repository URL:** `https://github.com/cgsecurity/testdisk`
+- **Distribution:** External system binary (`native_bin/fidentify_win.exe`, `native_bin/photorec_win.exe`)
+- **Version:** PhotoRec 7.2 (February 2024, Christophe GRENIER)
+- **Original License:** GNU General Public License v2 (GPL v2)
+- **License Status:** COMPATIBLE / NON-BLOCKING (External tool execution; isolated subprocess invocation with argument array safety)
+- **DREX Destination File:** `backend_adapters.py`, `recovery_adapter.py`
+- **DREX Destination Symbol:** `build_fidentify_command`, `parse_fidentify_output`, `MatureBackendOrchestrator.identify_with_fidentify`
+- **Adaptation Type:** REFERENCE_ONLY (Zero bundled code; external binary execution)
+- **Reason for Reuse:** Utilizes PhotoRec's mature file signature database (480+ file extensions across 300+ format families) for reference format identification alongside DREX internal validators.
+- **Dependencies:** Optional external CLI binary (`fidentify_win.exe`).
+- **Validation Evidence:** `tests/test_phase4_backend_qualification.py::test_photorec_fidentify_format_identification`.
+
+---
+
+### PROV-011: TSK Direct Filesystem Recovery Execution Engine
+- **Source Project:** The Sleuth Kit (TSK)
+- **Repository URL:** `https://github.com/sleuthkit/sleuthkit`
+- **Distribution:** External system binaries (`native_bin/tsk_recover.exe`, `native_bin/icat.exe`)
+- **Version:** The Sleuth Kit ver 4.15.0
+- **Original License:** IBM Public License 1.0 / CPL 1.0 / GPL v2
+- **License Status:** COMPATIBLE / NON-BLOCKING (External tool execution; isolated subprocess invocation)
+- **DREX Destination File:** `recovery_adapter.py`, `backend_adapters.py`
+- **DREX Destination Symbol:** `MatureBackendOrchestrator.recover_with_tsk`, `RecoveredArtifactRecord`, `BackendRecoveryExecution`
+- **Adaptation Type:** REFERENCE_ONLY (External execution engine; all recovered artifacts subjected to DREX independent structural validation)
+- **Reason for Reuse:** High-fidelity filesystem extraction engine for allocated and unallocated files from disk images; DREX serves as the assurance and independent verification layer.
+- **Dependencies:** Optional external CLI binaries (`tsk_recover.exe`, `icat.exe`).
+- **Validation Evidence:** `tests/test_phase4_backend_qualification.py::test_tsk_recover_known_answer_and_independent_validation`.
+
