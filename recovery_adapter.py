@@ -455,17 +455,82 @@ class TargetedRecoveryAdapter(BaseRecoveryAdapter):
 
 
 class FilesystemRecoveryAdapter(BaseRecoveryAdapter):
-    """Method 20: Full unallocated cluster assembly and directory tree reconstruction via tsk_recover."""
+    """Method 20: Full unallocated cluster assembly and directory tree reconstruction via native engines and tsk_recover."""
 
     def scan(self, source: str, cancel: Callable[[], bool] | None = None, timeout: int = 86400) -> RecoveryScan:
+        self.validate_source(source)
+        src_path = Path(source)
+
+        # Native DREX Phase 3 Filesystem Recovery Engine
+        if src_path.is_file():
+            try:
+                from fs_base import DiskImageSource
+                from fs_recovery import FilesystemRecoveryEngine
+                ds = DiskImageSource(src_path)
+                fs_candidates = FilesystemRecoveryEngine.scan_source(ds)
+                if fs_candidates:
+                    candidates = []
+                    for c in fs_candidates:
+                        candidates.append(
+                            RecoveryCandidate(
+                                candidate_id=c.candidate_id,
+                                name=c.filename,
+                                filesystem=c.filesystem.value,
+                                size=c.declared_size,
+                                deleted=c.is_deleted,
+                                confidence=0.95 if not c.is_deleted else 0.85,
+                                raw={
+                                    "original_path": c.original_path,
+                                    "reconstructed_path": c.reconstructed_path,
+                                    "path_state": c.path_state.value,
+                                    "extent_state": c.extent_state.value,
+                                    "is_resident": c.is_resident,
+                                    "limitations": c.limitations,
+                                },
+                                original_path=c.original_path,
+                                relative_path=c.reconstructed_path,
+                                recoverable=True,
+                                backend="DREX Native Filesystem Recovery Engine",
+                                is_directory=c.is_directory,
+                            )
+                        )
+                    return RecoveryScan(
+                        status="OK",
+                        message=f"Native filesystem scan: {len(candidates)} candidate(s) discovered",
+                        source={"path": source},
+                        candidates=tuple(candidates),
+                        warnings=(),
+                        raw={"candidate_count": len(candidates)},
+                        backend="DREX Native Filesystem Recovery Engine",
+                    )
+            except Exception:
+                pass
+
         quick = QuickRecoveryAdapter(self.root, self.meipass)
         return quick.scan(source, cancel=cancel, timeout=timeout)
 
     def recover(self, source: str, candidate_id: str, destination: Path, timeout: int = 86400) -> list[Path]:
         self.validate_source(source)
+        src_path = Path(source)
+
+        # Native DREX Recovery
+        if src_path.is_file():
+            try:
+                from fs_base import DiskImageSource
+                from fs_recovery import FilesystemRecoveryEngine
+                ds = DiskImageSource(src_path)
+                fs_candidates = FilesystemRecoveryEngine.scan_source(ds)
+                for c in fs_candidates:
+                    if c.candidate_id == candidate_id:
+                        ok, out_path, sha256_hash, meta = FilesystemRecoveryEngine.recover_candidate(ds, c, destination)
+                        if ok and out_path.exists():
+                            return [out_path]
+            except Exception:
+                pass
+
         tsk_rec = find_backend_executable("tsk", self.root, self.meipass)
         if tsk_rec is None:
-            raise RecoveryError(f"Filesystem Recovery requires tsk_recover. {self.unavailable_reason}")
+            raise RecoveryError(f"Filesystem Recovery requires native engine or tsk_recover. {self.unavailable_reason}")
         rec_exe = tsk_rec.parent / "tsk_recover.exe"
         if not rec_exe.is_file():
             rec_exe = tsk_rec
