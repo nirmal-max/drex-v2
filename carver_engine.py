@@ -40,7 +40,10 @@ class EvidenceScores:
     size_bounded: float = 0.0     # Size within realistic format-specific limits
 
     def composite_score(self) -> float:
-        """Calculate the scientifically defensible composite evidence confidence score.
+        """Calculate the DREX evidence confidence heuristic score.
+        
+        Note: This is an engineered multi-factor heuristic weighting (0.30/0.30/0.20/0.10/0.10),
+        not an empirically calibrated probability model.
         
         Formula:
         0.30 * sig_match + 0.30 * structure + 0.20 * continuity + 0.10 * metadata + 0.10 * size_bounded

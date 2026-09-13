@@ -181,7 +181,7 @@ class FragmentReassembler:
             has_valid_header = assembled[0].is_header
             has_valid_footer = assembled[-1].is_footer if len(assembled) > 1 else False
 
-            # Defensible evidence confidence calculation
+            # DREX evidence confidence heuristic calculation (engineered linear weighting)
             confidence = (
                 0.30 * (1.0 if has_valid_header else 0.0)
                 + 0.30 * (1.0 if has_valid_footer else 0.0)

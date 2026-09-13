@@ -700,3 +700,156 @@ class TestMathematicalAuditAndSafety:
         assert "Invalid target volume format" in (res.error_message or "")
 
 
+# ─── 8. Deterministic Known-Answer NTFS $Bitmap Fixtures ─────────────────────
+
+class TestNtfsKnownAnswerFixtures:
+    """Deterministic known-answer test vectors verifying bit decoding and run grouping."""
+
+    def test_known_answer_alternating_pattern(self):
+        # 0x55 = 0b01010101 (clusters 0,2,4,6 allocated; 1,3,5,7 free)
+        # 0xAA = 0b10101010 (clusters 8,10,12,14 free; 9,11,13,15 allocated)
+        raw_bitmap = bytes([0x55, 0xAA])
+        analyzer = NtfsBitmapAnalyzer(raw_bitmap, bytes_per_sector=512, sectors_per_cluster=8)
+
+        # Exact bit-level verification
+        expected_alloc = [
+            True, False, True, False, True, False, True, False,  # byte 0
+            False, True, False, True, False, True, False, True,  # byte 1
+        ]
+        for c_idx, expected in enumerate(expected_alloc):
+            assert analyzer.is_cluster_allocated(c_idx) == expected, f"Mismatch at cluster {c_idx}"
+
+        stats = analyzer.get_allocation_stats()
+        assert stats.total_clusters == 16
+        assert stats.allocated_clusters == 8
+        assert stats.free_clusters == 8
+        assert stats.free_percentage == 50.0
+        assert stats.cluster_size_bytes == 4096
+
+    def test_known_answer_all_allocated(self):
+        # 8 bytes of 0xFF = 64 clusters, all allocated
+        raw_bitmap = b"\xff" * 8
+        analyzer = NtfsBitmapAnalyzer(raw_bitmap)
+        stats = analyzer.get_allocation_stats()
+        assert stats.total_clusters == 64
+        assert stats.allocated_clusters == 64
+        assert stats.free_clusters == 0
+        assert stats.free_percentage == 0.0
+        assert stats.unallocated_runs_count == 0
+
+        free_runs = analyzer.extract_cluster_runs(policy=BitmapScanPolicy.FREE_ONLY)
+        assert len(free_runs) == 0
+
+    def test_known_answer_all_free(self):
+        # 8 bytes of 0x00 = 64 clusters, all free
+        raw_bitmap = b"\x00" * 8
+        analyzer = NtfsBitmapAnalyzer(raw_bitmap)
+        stats = analyzer.get_allocation_stats()
+        assert stats.total_clusters == 64
+        assert stats.allocated_clusters == 0
+        assert stats.free_clusters == 64
+        assert stats.free_percentage == 100.0
+        assert stats.unallocated_runs_count == 1
+
+        free_runs = analyzer.extract_cluster_runs(policy=BitmapScanPolicy.FREE_ONLY)
+        assert len(free_runs) == 1
+        assert free_runs[0].start_cluster == 0
+        assert free_runs[0].length == 64
+        assert free_runs[0].is_allocated is False
+
+    def test_known_answer_cluster_to_byte_offset_math(self):
+        raw_bitmap = b"\x00" * 16
+        analyzer = NtfsBitmapAnalyzer(raw_bitmap, bytes_per_sector=512, sectors_per_cluster=8)
+        # 512 * 8 = 4096 bytes per cluster
+        assert analyzer.cluster_to_byte_offset(0) == 0
+        assert analyzer.cluster_to_byte_offset(1) == 4096
+        assert analyzer.cluster_to_byte_offset(10) == 40960
+
+
+# ─── 9. Comprehensive Security Test Matrix ──────────────────────────────────
+
+class TestExplicitSecurityMatrix:
+    """Security audit tests verifying command safety, path isolation, and secret absence."""
+
+    def test_command_injection_safeguards(self):
+        # Malicious volume targets attempting shell chaining / pipes
+        malicious_targets = [
+            "C: | calc.exe",
+            "C: && notepad",
+            "C:; echo pwned",
+            "`whoami`",
+            "$(reboot)",
+            "../../Windows",
+        ]
+        for target in malicious_targets:
+            res = VssSanitizer.execute_purge(
+                confirm_destructive=True,
+                dry_run=True,
+                target_volume=target,
+            )
+            assert res.status == "BLOCKED"
+            assert "Invalid target volume format" in (res.error_message or "")
+
+    def test_path_traversal_isolation_guard(self, tmp_path: Path):
+        from recovery_adapter import RecoveryError, RecoveryTarget, TargetKind
+        src_dir = tmp_path / "source_media"
+        src_dir.mkdir()
+        dest_dir = src_dir / "recovered_inside"
+        dest_dir.mkdir()
+
+        target = RecoveryTarget(path=str(src_dir), kind=TargetKind.FOLDER)
+        # Enforce that destination residing inside source tree is BLOCKED
+        with pytest.raises(RecoveryError, match="cannot reside inside the recovery source tree"):
+            target.validate_destination(dest_dir)
+
+    def test_zip_traversal_filename_parsing_safety(self):
+        # ZIP with path traversal filename "../../etc/passwd"
+        buf = io.BytesIO()
+        import zipfile
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("../../evil.sh", b"malicious content")
+
+        zip_bytes = buf.getvalue()
+        carver = ZipCarveStream(zip_bytes)
+        assert carver.parse() is True
+        # Carving records filename safely without extracting to filesystem
+        assert len(carver.members) == 1
+        assert carver.members[0].filename == "../../evil.sh"
+
+    def test_malformed_input_crash_resistance(self):
+        # Random corrupt byte buffers passed into all format validators
+        corrupt_data = os.urandom(1024)
+        v_jpg, _, _, _ = FormatValidator.validate_jpeg(corrupt_data)
+        assert v_jpg is False
+        v_png, _, _, _ = FormatValidator.validate_png(corrupt_data)
+        assert v_png is False
+        v_pdf, _, _, _ = FormatValidator.validate_pdf(corrupt_data)
+        assert v_pdf is False
+        v_sql, _, _, _ = FormatValidator.validate_sqlite(corrupt_data)
+        assert v_sql is False
+
+    def test_resource_exhaustion_bounds(self):
+        # Extremely large candidate stream bounded by max_candidates
+        many_pngs = (b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 17 + b"\x00\x00\x00\x00IEND\xaeB`\x82") * 100
+        carver = DeepCarverEngine(max_candidates=5)
+        cands = carver.carve(many_pngs)
+        assert len(cands) == 5
+
+    def test_zero_secrets_or_hardcoded_credentials(self):
+        # Verify no hardcoded API keys or test secrets in phase 1 source files
+        import glob
+        import re
+        secret_patterns = [
+            re.compile(r"ghp_[A-Za-z0-9_]{36}"),
+            re.compile(r"sk-[A-Za-z0-9]{32}"),
+            re.compile(r"-----BEGIN [A-Z]+ PRIVATE KEY-----"),
+        ]
+        this_file = Path(__file__).resolve()
+        source_files = [f for f in glob.glob("*.py") + glob.glob("tests/*.py") if Path(f).resolve() != this_file]
+        for fpath in source_files:
+            content = Path(fpath).read_text(encoding="utf-8", errors="ignore")
+            for pattern in secret_patterns:
+                assert not pattern.search(content), f"Potential secret found in {fpath}"
+
+
+
