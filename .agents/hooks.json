@@ -1,0 +1,37 @@
+{
+  "version": "1.0",
+  "description": "DREX-V2 Antigravity Safety and Integrity Hooks",
+  "hooks": {
+    "pre_tool_execution": [
+      {
+        "name": "block_destructive_system_disk_writes",
+        "description": "Protects against accidental physical drive destruction on system disks (C:, PhysicalDrive0, boot, EFI)",
+        "enabled": true,
+        "protected_patterns": [
+          "\\\\\\\\.\\\\PhysicalDrive0",
+          "\\\\\\\\.\\\\C:",
+          "/dev/sda",
+          "/dev/nvme0n1"
+        ]
+      },
+      {
+        "name": "block_mass_deletion",
+        "description": "Prevents unmanifested mass deletion of workspace source directories",
+        "enabled": true,
+        "protected_directories": [
+          "methods",
+          "tests",
+          "native_bin",
+          "docs"
+        ]
+      }
+    ],
+    "post_tool_execution": [
+      {
+        "name": "verify_file_integrity",
+        "description": "Verifies that source file modifications do not corrupt syntax or test baselines",
+        "enabled": true
+      }
+    ]
+  }
+}
