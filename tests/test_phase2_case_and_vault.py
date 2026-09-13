@@ -42,6 +42,9 @@ from forensic_vault import (
     IndependentAuditVerifier,
     ChainOfCustodyRecord,
     CustodyAction,
+    CustodyVerificationStatus,
+    CustodyVerificationResult,
+    IndependentCustodyVerifier,
     EvidenceVault,
     VaultObjectType,
     VaultObject,
@@ -52,6 +55,9 @@ from forensic_vault import (
     PackageValidationStatus,
     canonical_json_bytes,
     safe_atomic_json_write,
+    safe_atomic_write,
+    sanitize_filename,
+    compute_event_hash,
 )
 
 
@@ -317,21 +323,68 @@ class TestHashChainedAuditAndTamperDetection:
         assert res.status == AuditVerificationStatus.BROKEN_CHAIN
         assert res.broken_sequence_index == 1
 
-    def test_tamper_detection_reordered_events(self, vault_env: ForensicCaseManager):
-        case = vault_env.create_case("C-TAMPER-04", "Tamper Test 4", "Examiner", "Org")
+    def test_tamper_detection_inserted_event(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-TAMPER-05", "Tamper Test 5", "Examiner", "Org")
         vault_env.update_case_status(case.case_id, CaseStatus.ACTIVE, actor="Examiner")
-
         chain = vault_env.get_audit_chain(case.case_id)
-        reordered_chain = [chain[1], chain[0]]
 
-        res = IndependentAuditVerifier.verify_chain(reordered_chain)
+        # Forge an inserted event
+        inserted = AuditEvent.create(
+            sequence_number=1,
+            case_id=case.case_id,
+            actor="Attacker",
+            event_type="UNAUTHORIZED_MUTATION",
+            payload={"injected": True},
+            previous_hash=chain[0].current_hash,
+        )
+        tampered_chain = [chain[0], inserted, chain[1]]
+        res = IndependentAuditVerifier.verify_chain(tampered_chain)
         assert res.status == AuditVerificationStatus.BROKEN_CHAIN
+        assert res.broken_sequence_index == 2
+
+    def test_tamper_detection_modified_case_id(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-TAMPER-06", "Tamper Test 6", "Examiner", "Org")
+        chain = vault_env.get_audit_chain(case.case_id)
+        tampered = [copy.deepcopy(e) for e in chain]
+        tampered[0].case_id = "CASE-FORGED-9999"
+
+        res = IndependentAuditVerifier.verify_chain(tampered)
+        assert res.status == AuditVerificationStatus.TAMPERED_EVENT
+        assert res.broken_sequence_index == 0
+
+    def test_tamper_detection_modified_operation_id(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-TAMPER-07", "Tamper Test 7", "Examiner", "Org")
+        vault_env.record_recovery_event(case.case_id, "OP-ORIG-01", "EVID-01", "Examiner", TimelineEventType.RECOVERY_COMPLETED, "Recovery done")
+        chain = vault_env.get_audit_chain(case.case_id)
+        tampered = [copy.deepcopy(e) for e in chain]
+        tampered[-1].operation_id = "OP-FORGED-99"
+
+        res = IndependentAuditVerifier.verify_chain(tampered)
+        assert res.status == AuditVerificationStatus.TAMPERED_EVENT
+
+    def test_tamper_detection_modified_timestamp(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-TAMPER-08", "Tamper Test 8", "Examiner", "Org")
+        chain = vault_env.get_audit_chain(case.case_id)
+        tampered = [copy.deepcopy(e) for e in chain]
+        tampered[0].timestamp = "1999-01-01T00:00:00Z"
+
+        res = IndependentAuditVerifier.verify_chain(tampered)
+        assert res.status == AuditVerificationStatus.TAMPERED_EVENT
+
+    def test_tamper_detection_modified_actor_or_event_type(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-TAMPER-09", "Tamper Test 9", "Examiner", "Org")
+        chain = vault_env.get_audit_chain(case.case_id)
+        tampered = [copy.deepcopy(e) for e in chain]
+        tampered[0].actor = "MaliciousAttacker"
+
+        res = IndependentAuditVerifier.verify_chain(tampered)
+        assert res.status == AuditVerificationStatus.TAMPERED_EVENT
 
 
 # ─── 6. Chain of Custody Tests ────────────────────────────────────────────────
 
 class TestChainOfCustody:
-    def test_custody_intake_and_transfer_lifecycle(self, vault_env: ForensicCaseManager):
+    def test_all_eight_custody_actions_lifecycle(self, vault_env: ForensicCaseManager):
         case = vault_env.create_case("C-CUST-01", "Custody Test", "Officer A", "Police Dept")
         ev = vault_env.register_evidence(
             case_id=case.case_id,
@@ -340,26 +393,96 @@ class TestChainOfCustody:
             examiner="Officer A",
         )
 
-        # Transfer custody to Specialist B
-        t_rec = vault_env.record_custody_event(
-            evidence_id=ev.evidence_id,
-            case_id=case.case_id,
-            custodian="Specialist B",
-            action=CustodyAction.TRANSFERRED,
-            reason="Transferred to Digital Forensics Laboratory for bitstream imaging.",
-            source_location="Evidence Locker Room #4",
-            destination="Forensic Workstation #12",
-        )
+        all_actions = [
+            CustodyAction.RECEIVED,
+            CustodyAction.TRANSFERRED,
+            CustodyAction.ACCESSED,
+            CustodyAction.COPIED,
+            CustodyAction.ANALYZED,
+            CustodyAction.EXPORTED,
+            CustodyAction.SEALED,
+            CustodyAction.RELEASED,
+        ]
 
-        assert t_rec.custody_event_id.startswith("CUST-")
-        assert t_rec.action == CustodyAction.TRANSFERRED
-        assert t_rec.custodian == "Specialist B"
-        assert t_rec.integrity_reference != ""
+        for act in all_actions:
+            rec = vault_env.record_custody_event(
+                evidence_id=ev.evidence_id,
+                case_id=case.case_id,
+                custodian="Examiner Jones",
+                action=act,
+                reason=f"Action {act.value} verification",
+                source_location="Lab A",
+                destination="Lab B",
+                hash_before="a" * 64,
+                hash_after="b" * 64,
+            )
+            assert rec.action == act
+            assert rec.integrity_reference == rec.calculate_integrity()
 
-        # Retrieve and verify full custody history
+        # Independent verification of full custody chain
+        v_res = vault_env.verify_case_custody(case.case_id)
+        assert v_res.status == CustodyVerificationStatus.VALID
+        assert v_res.total_records >= len(all_actions)
+
+    def test_custody_tamper_modified_custodian(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-CUST-TAMPER-01", "Tamper Custody 1", "Officer A", "Police")
+        ev = vault_env.register_evidence(case.case_id, EvidenceSourceType.FILE, "/path/1", "Officer A")
         records = vault_env.list_custody_records(case.case_id)
-        assert len(records) >= 2  # RECEIVED on intake + TRANSFERRED
-        assert records[-1].custodian == "Specialist B"
+        tampered = [copy.deepcopy(r) for r in records]
+        tampered[0].custodian = "Attacker"
+
+        res = IndependentCustodyVerifier.verify_custody_records(tampered)
+        assert res.status == CustodyVerificationStatus.TAMPERED_RECORD
+        assert "Tampered custody record" in res.error_message
+
+    def test_custody_tamper_modified_action(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-CUST-TAMPER-02", "Tamper Custody 2", "Officer A", "Police")
+        ev = vault_env.register_evidence(case.case_id, EvidenceSourceType.FILE, "/path/1", "Officer A")
+        records = vault_env.list_custody_records(case.case_id)
+        tampered = [copy.deepcopy(r) for r in records]
+        tampered[0].action = CustodyAction.RELEASED
+
+        res = IndependentCustodyVerifier.verify_custody_records(tampered)
+        assert res.status == CustodyVerificationStatus.TAMPERED_RECORD
+
+    def test_custody_tamper_modified_timestamp(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-CUST-TAMPER-03", "Tamper Custody 3", "Officer A", "Police")
+        ev = vault_env.register_evidence(case.case_id, EvidenceSourceType.FILE, "/path/1", "Officer A")
+        records = vault_env.list_custody_records(case.case_id)
+        tampered = [copy.deepcopy(r) for r in records]
+        tampered[0].timestamp = "2000-01-01T00:00:00Z"
+
+        res = IndependentCustodyVerifier.verify_custody_records(tampered)
+        assert res.status == CustodyVerificationStatus.TAMPERED_RECORD
+
+    def test_custody_tamper_modified_evidence_id(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-CUST-TAMPER-04", "Tamper Custody 4", "Officer A", "Police")
+        ev = vault_env.register_evidence(case.case_id, EvidenceSourceType.FILE, "/path/1", "Officer A")
+        records = vault_env.list_custody_records(case.case_id)
+        tampered = [copy.deepcopy(r) for r in records]
+        tampered[0].evidence_id = "EVID-FORGED-01"
+
+        res = IndependentCustodyVerifier.verify_custody_records(tampered)
+        assert res.status == CustodyVerificationStatus.TAMPERED_RECORD
+
+    def test_custody_tamper_deleted_or_reordered_event(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-CUST-TAMPER-05", "Tamper Custody 5", "Officer A", "Police")
+        ev = vault_env.register_evidence(case.case_id, EvidenceSourceType.FILE, "/path/1", "Officer A")
+        vault_env.record_custody_event(ev.evidence_id, case.case_id, "Specialist B", CustodyAction.TRANSFERRED, "Transfer", "Locker", "Desk")
+        vault_env.record_custody_event(ev.evidence_id, case.case_id, "Specialist B", CustodyAction.ANALYZED, "Analysis", "Desk", "Desk")
+
+        records = vault_env.list_custody_records(case.case_id)
+        audits = vault_env.get_audit_chain(case.case_id)
+
+        # 1. Deleted record
+        deleted_records = [records[0], records[2]]
+        res_del = IndependentCustodyVerifier.verify_custody_records(deleted_records, audits)
+        assert res_del.status == CustodyVerificationStatus.AUDIT_MISMATCH
+
+        # 2. Reordered records
+        reordered_records = [records[1], records[0], records[2]]
+        res_reord = IndependentCustodyVerifier.verify_custody_records(reordered_records, audits)
+        assert res_reord.status == CustodyVerificationStatus.AUDIT_MISMATCH
 
 
 # ─── 7. Evidence Vault Categorization Tests ───────────────────────────────────
@@ -437,6 +560,50 @@ class TestProvenanceRecords:
         assert reconstructed.candidate_id == "cand-001"
         assert reconstructed.validation_state == RecoveryCandidateState.VALIDATED_CANDIDATE
 
+    def test_recovery_artifact_full_lifecycle_and_persistence(self, vault_env: ForensicCaseManager, tmp_path: Path):
+        case = vault_env.create_case("C-REC-PROV-01", "Recovery Provenance", "Examiner", "Lab")
+        ev = vault_env.register_evidence(case.case_id, EvidenceSourceType.DISK_IMAGE, "/disk.raw", "Examiner")
+
+        # Lifecycle: CANDIDATE -> VALIDATED_CANDIDATE -> RECONSTRUCTED_CANDIDATE -> RECOVERED_ARTIFACT
+        states = [
+            RecoveryCandidateState.CANDIDATE,
+            RecoveryCandidateState.VALIDATED_CANDIDATE,
+            RecoveryCandidateState.RECONSTRUCTED_CANDIDATE,
+            RecoveryCandidateState.RECOVERED_ARTIFACT,
+        ]
+
+        for idx, st in enumerate(states):
+            art = RecoveryArtifactRecord(
+                candidate_id=f"cand-{idx:03d}",
+                case_id=case.case_id,
+                source_evidence_id=ev.evidence_id,
+                source_offset=idx * 1024 * 1024,
+                filesystem_origin="NTFS",
+                carving_method="DeepCarverEngine.carve",
+                reconstruction_method="FragmentReassembler.reassemble",
+                evidence_confidence_score=0.90 + (idx * 0.02),
+                validation_state=st,
+                output_hash=f"hash_{idx}" * 8,
+                output_size=1024 * (idx + 1),
+                limitations=["CLUSTER_CONTIGUITY: NON_CONTIGUOUS_VALIDATED"],
+            )
+            saved = vault_env.record_recovery_artifact(case.case_id, art, actor="Lead Examiner")
+            assert saved.validation_state == st
+
+        # Reload from persistence
+        persisted = vault_env.list_recovery_artifacts(case.case_id)
+        assert len(persisted) == 4
+        assert persisted[-1].validation_state == RecoveryCandidateState.RECOVERED_ARTIFACT
+        assert persisted[-1].limitations == ["CLUSTER_CONTIGUITY: NON_CONTIGUOUS_VALIDATED"]
+
+        # Export and import verification
+        cdir = vault_env._case_path(case.case_id)
+        pkg_path = tmp_path / "rec_case_pkg.tar.gz"
+        CasePackageManager.export_package(cdir, pkg_path)
+        dest_vault = tmp_path / "imported_rec_vault"
+        res = CasePackageManager.validate_and_import(pkg_path, dest_vault)
+        assert res.status == PackageValidationStatus.VALID
+
     def test_sanitization_provenance_record_dataclass(self):
         rec = SanitizationProvenanceRecord(
             operation_id="op-san-001",
@@ -461,12 +628,53 @@ class TestProvenanceRecords:
         assert rec.execution_status == "SIMULATION_QUALIFIED"
         assert rec.verification_result == "VERIFIED"
 
+    def test_sanitization_provenance_truth_states_and_persistence(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-SAN-PROV-01", "Sanitization Provenance", "Examiner", "Lab")
+        ev = vault_env.register_evidence(case.case_id, EvidenceSourceType.PHYSICAL_DEVICE, r"\\.\PhysicalDrive3", "Examiner")
+
+        truth_statuses = [
+            ("SUCCESS", "VERIFIED"),
+            ("SIMULATION_QUALIFIED", "VERIFIED"),
+            ("PARTIAL", "PARTIAL"),
+            ("FAILED", "NOT_EXECUTED"),
+            ("EXECUTION_BLOCKED", "NOT_EXECUTED"),
+        ]
+
+        for idx, (status, verif) in enumerate(truth_statuses):
+            rec = SanitizationProvenanceRecord(
+                operation_id=f"op-san-{idx:03d}",
+                case_id=case.case_id,
+                evidence_id=ev.evidence_id,
+                device_identity="PhysicalDrive3",
+                transport="NVMe",
+                method_id="nvme_crypto_scramble",
+                method_name="NVMe Format Cryptographic Erase",
+                capability_state="SUPPORTED",
+                execution_backend="NativeHardwareEngine",
+                execution_status=status,
+                verification_method="ShannonEntropyEngine",
+                verification_result=verif,
+                evidence_data={"test_idx": idx},
+                limitations=["PHYSICAL_HARDWARE_QUALIFICATION: PENDING"],
+                safety_checks=["Safety interlock confirmed"],
+                confirmation_state=True,
+                started_at="2026-09-14T01:00:00Z",
+                completed_at="2026-09-14T01:00:02Z",
+            )
+            vault_env.record_sanitization_provenance(case.case_id, rec, actor="Examiner")
+
+        # Verify listed records
+        san_list = vault_env.list_sanitization_provenance(case.case_id)
+        assert len(san_list) == len(truth_statuses)
+        assert san_list[0].execution_status == "SUCCESS"
+        assert san_list[1].execution_status == "SIMULATION_QUALIFIED"
+        assert san_list[2].execution_status == "PARTIAL"
+
 
 # ─── 9. Case Package Export & Import Integrity Tests ──────────────────────────
 
 class TestCasePackageExportAndImport:
     def test_export_and_import_valid_case_package(self, vault_env: ForensicCaseManager, tmp_path: Path):
-        # 1. Create a populated case
         case = vault_env.create_case("C-EXP-01", "Exportable Case", "Examiner A", "Cyber Lab")
         ev_file = tmp_path / "sample_doc.txt"
         ev_file.write_bytes(b"Sample case evidence text data")
@@ -476,12 +684,10 @@ class TestCasePackageExportAndImport:
         vault = EvidenceVault(cdir)
         vault.store_file(case.case_id, ev_file, VaultObjectType.RECOVERED, "doc.txt")
 
-        # 2. Export package
         pkg_path = tmp_path / "case_export.drex.tar.gz"
         CasePackageManager.export_package(cdir, pkg_path)
         assert pkg_path.is_file()
 
-        # 3. Import into a new target vault
         import_vault_dir = tmp_path / "imported_vault"
         res = CasePackageManager.validate_and_import(pkg_path, import_vault_dir)
 
@@ -497,31 +703,26 @@ class TestCasePackageExportAndImport:
         pkg_path = tmp_path / "corrupted_pkg.drex.tar.gz"
         CasePackageManager.export_package(cdir, pkg_path)
 
-        # Unpack, corrupt a file, repack
         tamper_dir = tmp_path / "tamper_scratch"
         tamper_dir.mkdir()
         with tarfile.open(pkg_path, "r:gz") as tar:
             tar.extractall(tamper_dir)
 
-        # Corrupt case.json
         case_json_file = tamper_dir / "case.json"
         case_json_file.write_text("Corrupted content that does not match manifest hash", encoding="utf-8")
 
-        # Repack
         tampered_pkg = tmp_path / "tampered.drex.tar.gz"
         with tarfile.open(tampered_pkg, "w:gz") as tar:
             for f in sorted(tamper_dir.rglob("*")):
                 if f.is_file():
                     tar.add(f, arcname=f.relative_to(tamper_dir).as_posix())
 
-        # Validation must reject with CORRUPTED_OBJECT
         dest_vault = tmp_path / "dest_vault"
         res = CasePackageManager.validate_and_import(tampered_pkg, dest_vault)
         assert res.status == PackageValidationStatus.CORRUPTED_OBJECT
         assert res.objects_corrupted >= 1
 
     def test_import_detects_path_traversal_attack(self, tmp_path: Path):
-        # Create an adversarial tar with ../../../evil.txt
         evil_tar = tmp_path / "evil_traversal.tar.gz"
         with tarfile.open(evil_tar, "w:gz") as tar:
             data = b"malicious script"
@@ -533,6 +734,42 @@ class TestCasePackageExportAndImport:
         res = CasePackageManager.validate_and_import(evil_tar, dest_vault)
         assert res.status == PackageValidationStatus.UNSAFE_PATH
         assert "unsafe path detected" in res.error_message
+
+    def test_windows_unc_and_drive_traversal_attack(self, tmp_path: Path):
+        # Test UNC path in tar member
+        unc_tar = tmp_path / "unc_attack.tar.gz"
+        with tarfile.open(unc_tar, "w:gz") as tar:
+            data = b"unc exploit"
+            ti = tarfile.TarInfo(name=r"\\attacker-server\share\exploit.exe")
+            ti.size = len(data)
+            tar.addfile(ti, io.BytesIO(data))
+
+        dest_vault = tmp_path / "safe_dest_2"
+        res = CasePackageManager.validate_and_import(unc_tar, dest_vault)
+        assert res.status == PackageValidationStatus.UNSAFE_PATH
+
+        # Test Windows drive letter path in tar member
+        drive_tar = tmp_path / "drive_attack.tar.gz"
+        with tarfile.open(drive_tar, "w:gz") as tar:
+            data = b"drive exploit"
+            ti = tarfile.TarInfo(name="C:/Windows/System32/evil.sys")
+            ti.size = len(data)
+            tar.addfile(ti, io.BytesIO(data))
+
+        res2 = CasePackageManager.validate_and_import(drive_tar, dest_vault)
+        assert res2.status == PackageValidationStatus.UNSAFE_PATH
+
+    def test_archive_symlink_attack_rejected(self, tmp_path: Path):
+        sym_tar = tmp_path / "symlink_attack.tar.gz"
+        with tarfile.open(sym_tar, "w:gz") as tar:
+            ti = tarfile.TarInfo(name="symlink_link")
+            ti.type = tarfile.SYMTYPE
+            ti.linkname = "/etc/shadow"
+            tar.addfile(ti)
+
+        dest_vault = tmp_path / "safe_dest_sym"
+        res = CasePackageManager.validate_and_import(sym_tar, dest_vault)
+        assert res.status == PackageValidationStatus.UNSAFE_PATH
 
 
 # ─── 10. Crash Safety & Concurrency Tests ─────────────────────────────────────
@@ -546,6 +783,26 @@ class TestCrashSafetyAndConcurrency:
 
         loaded = json.loads(target.read_text(encoding="utf-8"))
         assert loaded == data
+
+    def test_safe_atomic_write_crash_simulation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        target = tmp_path / "crucial_file.json"
+        original_data = {"status": "INITIAL_STABLE_STATE"}
+        safe_atomic_json_write(target, original_data)
+        assert target.is_file()
+
+        # Simulate crash/failure right before atomic replacement (monkeypatch os.replace)
+        def crashing_replace(src: str, dst: str):
+            raise OSError("Simulated crash: disk full or power failure")
+
+        monkeypatch.setattr(os, "replace", crashing_replace)
+
+        with pytest.raises(OSError, match="Simulated crash"):
+            safe_atomic_json_write(target, {"status": "UNFINISHED_CORRUPTED_STATE"})
+
+        # The original target file must remain intact and valid
+        assert target.is_file()
+        current_data = json.loads(target.read_text(encoding="utf-8"))
+        assert current_data == original_data
 
     def test_concurrent_evidence_registration_thread_safety(self, vault_env: ForensicCaseManager, tmp_path: Path):
         case = vault_env.create_case("C-CONCUR-01", "Concurrency Test", "Examiner", "Org")
@@ -580,3 +837,126 @@ class TestCrashSafetyAndConcurrency:
         # Verify audit chain integrity remains 100% valid under concurrency
         audit_res = vault_env.verify_case_audit_chain(case.case_id)
         assert audit_res.status == AuditVerificationStatus.VALID
+
+
+# ─── 11. Timeline ↔ Audit Consistency Tests ───────────────────────────────────
+
+class TestTimelineAuditConsistency:
+    def test_timeline_audit_consistency_on_all_lifecycle_mutations(self, vault_env: ForensicCaseManager):
+        case = vault_env.create_case("C-TAC-01", "Consistency Test", "Examiner", "Cyber Dept")
+        ev = vault_env.register_evidence(case.case_id, EvidenceSourceType.FILE, "/evidence.img", "Examiner")
+        vault_env.update_case_status(case.case_id, CaseStatus.ACTIVE, actor="Examiner")
+
+        # Record operational mutations
+        vault_env.record_recovery_event(case.case_id, "OP-REC-1", ev.evidence_id, "Examiner", TimelineEventType.RECOVERY_STARTED, "Starting deep carving")
+        vault_env.record_recovery_event(case.case_id, "OP-REC-1", ev.evidence_id, "Examiner", TimelineEventType.RECOVERY_COMPLETED, "Carving complete")
+
+        vault_env.record_sanitization_event(case.case_id, "OP-SAN-1", ev.evidence_id, "Examiner", TimelineEventType.SANITIZATION_STARTED, "Starting sanitization")
+        vault_env.record_sanitization_event(case.case_id, "OP-SAN-1", ev.evidence_id, "Examiner", TimelineEventType.SANITIZATION_COMPLETED, "Sanitization complete")
+
+        vault_env.record_verification_event(case.case_id, "OP-VER-1", ev.evidence_id, "Examiner", TimelineEventType.VERIFICATION_STARTED, "Starting entropy verification")
+        vault_env.record_verification_event(case.case_id, "OP-VER-1", ev.evidence_id, "Examiner", TimelineEventType.VERIFICATION_COMPLETED, "Entropy verified")
+
+        vault_env.record_certificate_event(case.case_id, "CERT-001", "OP-SAN-1", ev.evidence_id, "Examiner", TimelineEventType.CERTIFICATE_CREATED, "Sanitization certificate generated")
+
+        vault_env.record_export_event(case.case_id, "/exports/case.drex.tar.gz", "Examiner", "Case exported to archive")
+
+        timeline = vault_env.get_timeline(case.case_id)
+        audit_chain = vault_env.get_audit_chain(case.case_id)
+
+        # Timeline and Audit Chain must have recorded all major operational events
+        assert len(timeline) >= 10
+        assert len(audit_chain) >= 10
+
+        # Verify audit chain validity
+        v_res = vault_env.verify_case_audit_chain(case.case_id)
+        assert v_res.status == AuditVerificationStatus.VALID
+        assert v_res.verified_events == len(audit_chain)
+
+        # Verify timeline integrity hashes
+        for t in timeline:
+            assert t.calculate_integrity_hash() == t.integrity_hash
+
+
+# ─── 12. Cross-Case Isolation & Path Security Tests ───────────────────────────
+
+class TestCrossCaseIsolationAndPathSecurity:
+    def test_cross_case_isolation_cannot_access_other_case(self, vault_env: ForensicCaseManager, tmp_path: Path):
+        case_a = vault_env.create_case("CA-01", "Case Alpha", "Examiner A", "Org A")
+        case_b = vault_env.create_case("CB-01", "Case Beta", "Examiner B", "Org B")
+
+        ev_a_file = tmp_path / "alpha_doc.txt"
+        ev_a_file.write_bytes(b"Alpha Confidential Data")
+        ev_a = vault_env.register_evidence(case_a.case_id, EvidenceSourceType.FILE, str(ev_a_file), "Examiner A")
+
+        ev_b_file = tmp_path / "beta_doc.txt"
+        ev_b_file.write_bytes(b"Beta Top Secret Data")
+        ev_b = vault_env.register_evidence(case_b.case_id, EvidenceSourceType.FILE, str(ev_b_file), "Examiner B")
+
+        # Listing evidence for Case A must not contain Case B evidence
+        ev_list_a = vault_env.list_evidence(case_a.case_id)
+        ev_list_b = vault_env.list_evidence(case_b.case_id)
+
+        a_ids = [e.evidence_id for e in ev_list_a]
+        b_ids = [e.evidence_id for e in ev_list_b]
+
+        assert ev_a.evidence_id in a_ids
+        assert ev_b.evidence_id not in a_ids
+        assert ev_b.evidence_id in b_ids
+        assert ev_a.evidence_id not in b_ids
+
+    def test_case_path_traversal_sanitization(self, vault_env: ForensicCaseManager):
+        # Attempting path traversal case_id is sanitized safely
+        evil_id = "../CASE-EVIL"
+        c_path = vault_env._case_path(evil_id)
+        assert c_path.is_relative_to(vault_env.cases_dir)
+        assert ".." not in str(c_path.name)
+
+    def test_unc_and_colon_path_sanitization(self):
+        assert sanitize_filename("C:\\malicious\\path") == "malicious_path"
+        assert sanitize_filename("\\\\server\\share\\file.txt") == "server_share_file.txt"
+        assert sanitize_filename("NUL") == "_NUL_"
+        assert sanitize_filename("CON") == "_CON_"
+        assert sanitize_filename("COM1") == "_COM1_"
+
+
+# ─── 13. Schema Versioning Tests ──────────────────────────────────────────────
+
+class TestSchemaVersioning:
+    def test_schema_version_validation_on_models(self):
+        case = ForensicCase("CASE-01", "C-01", "Title", "Desc", "Ex", "Org", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        assert case.schema_version == 1
+
+        ev = EvidenceSource("EVID-01", "CASE-01", EvidenceSourceType.FILE, "/path")
+        assert ev.schema_version == 1
+
+        vobj = VaultObject("VLT-01", "CASE-01", VaultObjectType.SOURCE, "rel/path", 100, "hash", "2026-01-01T00:00:00Z")
+        assert vobj.schema_version == 1
+
+    def test_package_schema_mismatch_detection(self, vault_env: ForensicCaseManager, tmp_path: Path):
+        case = vault_env.create_case("C-SCH-01", "Schema Test", "Examiner", "Org")
+        cdir = vault_env._case_path(case.case_id)
+        pkg_path = tmp_path / "schema_pkg.tar.gz"
+        CasePackageManager.export_package(cdir, pkg_path)
+
+        # Unpack, alter schema_version, repack
+        tamper_dir = tmp_path / "tamper_schema"
+        tamper_dir.mkdir()
+        with tarfile.open(pkg_path, "r:gz") as tar:
+            tar.extractall(tamper_dir)
+
+        manifest_file = tamper_dir / "manifest.json"
+        manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+        manifest_data["schema_version"] = 999  # Unsupported version
+        manifest_file.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+        tampered_pkg = tmp_path / "unsupported_schema.tar.gz"
+        with tarfile.open(tampered_pkg, "w:gz") as tar:
+            for f in sorted(tamper_dir.rglob("*")):
+                if f.is_file():
+                    tar.add(f, arcname=f.relative_to(tamper_dir).as_posix())
+
+        dest_vault = tmp_path / "dest_schema_vault"
+        res = CasePackageManager.validate_and_import(tampered_pkg, dest_vault)
+        assert res.status == PackageValidationStatus.SCHEMA_MISMATCH
+        assert "Unsupported package schema version" in res.error_message

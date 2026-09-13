@@ -116,6 +116,14 @@ class AuditVerificationStatus(enum.Enum):
     UNVERIFIABLE = "UNVERIFIABLE"
 
 
+class CustodyVerificationStatus(enum.Enum):
+    VALID = "VALID"
+    INVALID = "INVALID"
+    TAMPERED_RECORD = "TAMPERED_RECORD"
+    BROKEN_SEQUENCE = "BROKEN_SEQUENCE"
+    AUDIT_MISMATCH = "AUDIT_MISMATCH"
+
+
 class PackageValidationStatus(enum.Enum):
     VALID = "VALID"
     INVALID = "INVALID"
@@ -142,6 +150,33 @@ def generate_stable_id(prefix: str) -> str:
 def canonical_json_bytes(data: Any) -> bytes:
     """Serialize data into deterministic, sort-keyed, compact JSON bytes."""
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+
+def compute_event_hash(
+    previous_hash: str,
+    sequence_number: int,
+    event_id: str,
+    case_id: str,
+    timestamp: str,
+    actor: str,
+    event_type: str,
+    payload: Dict[str, Any],
+    operation_id: Optional[str] = None,
+) -> str:
+    """Calculate deterministic SHA-256 hash for an audit event covering the entire envelope."""
+    envelope = {
+        "sequence_number": sequence_number,
+        "event_id": event_id,
+        "case_id": case_id,
+        "timestamp": timestamp,
+        "actor": actor,
+        "event_type": event_type,
+        "operation_id": operation_id,
+        "payload": payload,
+    }
+    canon_bytes = canonical_json_bytes(envelope)
+    preimage = previous_hash.encode("utf-8") + canon_bytes
+    return hashlib.sha256(preimage).hexdigest()
 
 
 def safe_atomic_write(path: Path, content: Union[str, bytes]) -> None:
@@ -177,9 +212,18 @@ def safe_atomic_json_write(path: Path, data: Any) -> None:
 
 
 def sanitize_filename(name: str) -> str:
-    """Sanitize path component to prevent path traversal and illegal characters."""
-    cleaned = re.sub(r'[/\\:*?"<>|]', '_', name)
-    cleaned = cleaned.strip('. ')
+    """Sanitize path component to prevent path traversal, drive specifiers, and illegal characters."""
+    cleaned = re.sub(r'^[a-zA-Z]:', '', name)
+    cleaned = re.sub(r'[/\\:*?"<>|]', '_', cleaned)
+    cleaned = re.sub(r'_+', '_', cleaned)
+    cleaned = cleaned.strip('. _')
+    reserved = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    }
+    if cleaned.upper() in reserved:
+        cleaned = f"_{cleaned}_"
     return cleaned or "unnamed_object"
 
 
@@ -332,15 +376,25 @@ class AuditEvent:
         payload: Dict[str, Any],
         previous_hash: str,
         operation_id: Optional[str] = None,
+        timestamp: Optional[str] = None,
+        event_id: Optional[str] = None,
     ) -> AuditEvent:
-        event_id = generate_stable_id("AUD")
-        ts = utc_now_iso()
-        canon_bytes = canonical_json_bytes(payload)
-        preimage = previous_hash.encode("utf-8") + canon_bytes
-        cur_hash = hashlib.sha256(preimage).hexdigest()
+        ev_id = event_id or generate_stable_id("AUD")
+        ts = timestamp or utc_now_iso()
+        cur_hash = compute_event_hash(
+            previous_hash=previous_hash,
+            sequence_number=sequence_number,
+            event_id=ev_id,
+            case_id=case_id,
+            timestamp=ts,
+            actor=actor,
+            event_type=event_type,
+            payload=payload,
+            operation_id=operation_id,
+        )
         return cls(
             sequence_number=sequence_number,
-            event_id=event_id,
+            event_id=ev_id,
             case_id=case_id,
             timestamp=ts,
             actor=actor,
@@ -590,13 +644,13 @@ class StreamingHasher:
             )
 
 
-# ─── Independent Audit Verifier ───────────────────────────────────────────────
+# ─── Independent Audit & Custody Verifiers ────────────────────────────────────
 
 class IndependentAuditVerifier:
     """
     Stateless, independent verifier for hash-chained audit ledgers.
-    Detects payload mutations, previous hash tampering, broken sequences,
-    deleted events, and inserted/reordered records.
+    Detects payload mutations, altered timestamps, modified case/operation IDs,
+    previous hash tampering, broken sequences, deleted events, and inserted/reordered records.
     """
     GENESIS_HASH = "0" * 64
 
@@ -643,9 +697,18 @@ class IndependentAuditVerifier:
                     details=details,
                 )
 
-            # Check 3: Canonical payload integrity
-            canon_bytes = canonical_json_bytes(event.canonical_payload)
-            expected_current = hashlib.sha256(event.previous_hash.encode("utf-8") + canon_bytes).hexdigest()
+            # Check 3: Full canonical envelope integrity (covers case_id, timestamp, actor, event_type, operation_id, payload)
+            expected_current = compute_event_hash(
+                previous_hash=event.previous_hash,
+                sequence_number=event.sequence_number,
+                event_id=event.event_id,
+                case_id=event.case_id,
+                timestamp=event.timestamp,
+                actor=event.actor,
+                event_type=event.event_type,
+                payload=event.canonical_payload,
+                operation_id=event.operation_id,
+            )
 
             if event.current_hash != expected_current:
                 msg = (
@@ -699,6 +762,90 @@ class IndependentAuditVerifier:
                 verified_events=0,
                 error_message=f"Failed to parse audit ledger: {exc}",
             )
+
+
+@dataclass
+class CustodyVerificationResult:
+    status: CustodyVerificationStatus
+    total_records: int
+    verified_records: int
+    error_message: Optional[str] = None
+    details: List[str] = field(default_factory=list)
+
+
+class IndependentCustodyVerifier:
+    """
+    Stateless independent verifier for Chain of Custody records.
+    Verifies individual record integrity hashes and verifies ordering against the audit ledger.
+    """
+    @classmethod
+    def verify_custody_records(
+        cls,
+        records: List[ChainOfCustodyRecord],
+        audit_events: Optional[List[AuditEvent]] = None,
+    ) -> CustodyVerificationResult:
+        if not records:
+            return CustodyVerificationResult(
+                status=CustodyVerificationStatus.VALID,
+                total_records=0,
+                verified_records=0,
+                details=["Empty custody ledger verified as valid."],
+            )
+
+        details = []
+        # 1. Verify individual record integrity hashes
+        for idx, rec in enumerate(records):
+            calc_hash = rec.calculate_integrity()
+            if rec.integrity_reference != calc_hash:
+                msg = (
+                    f"Tampered custody record at index {idx} ({rec.custody_event_id}): "
+                    f"expected {calc_hash[:16]}..., found {rec.integrity_reference[:16]}..."
+                )
+                details.append(msg)
+                return CustodyVerificationResult(
+                    status=CustodyVerificationStatus.TAMPERED_RECORD,
+                    total_records=len(records),
+                    verified_records=idx,
+                    error_message=msg,
+                    details=details,
+                )
+
+        # 2. If audit events provided, verify that every custody record matches an audit event in sequence
+        if audit_events is not None:
+            custody_audits = [e for e in audit_events if e.event_type == "CUSTODY_CHANGE"]
+            if len(custody_audits) != len(records):
+                msg = (
+                    f"Custody record count ({len(records)}) does not match "
+                    f"audit chain custody events ({len(custody_audits)})."
+                )
+                details.append(msg)
+                return CustodyVerificationResult(
+                    status=CustodyVerificationStatus.AUDIT_MISMATCH,
+                    total_records=len(records),
+                    verified_records=0,
+                    error_message=msg,
+                    details=details,
+                )
+            for idx, (rec, aud) in enumerate(zip(records, custody_audits)):
+                aud_cust_id = aud.canonical_payload.get("custody_event_id")
+                aud_hash = aud.canonical_payload.get("integrity_reference")
+                if aud_cust_id != rec.custody_event_id or aud_hash != rec.integrity_reference:
+                    msg = f"Custody record {rec.custody_event_id} at index {idx} does not match audit event payload."
+                    details.append(msg)
+                    return CustodyVerificationResult(
+                        status=CustodyVerificationStatus.AUDIT_MISMATCH,
+                        total_records=len(records),
+                        verified_records=idx,
+                        error_message=msg,
+                        details=details,
+                    )
+
+        return CustodyVerificationResult(
+            status=CustodyVerificationStatus.VALID,
+            total_records=len(records),
+            verified_records=len(records),
+            details=[f"All {len(records)} custody records cryptographically verified."],
+        )
 
 
 # ─── Evidence Vault Manager ───────────────────────────────────────────────────
@@ -864,12 +1011,22 @@ class CasePackageManager:
         extract_temp = Path(tempfile.mkdtemp(prefix="drex_import_"))
         details = []
         try:
-            # 1. Safe extraction with path traversal defense
+            # 1. Safe extraction with path traversal defense (POSIX + Windows UNC/drive letters/colons)
             with tarfile.open(pkg, "r:gz") as tar:
                 for member in tar.getmembers():
-                    # Reject path traversal (e.g. ../ or absolute paths)
                     norm = os.path.normpath(member.name)
-                    if norm.startswith("..") or os.path.isabs(member.name) or ":" in member.name:
+                    if (
+                        norm.startswith("..")
+                        or norm.startswith("\\..")
+                        or norm.startswith("/..")
+                        or os.path.isabs(member.name)
+                        or bool(re.match(r'^[a-zA-Z]:', member.name))
+                        or ":" in member.name
+                        or member.name.startswith("\\\\")
+                        or member.name.startswith("//")
+                        or member.issym()
+                        or member.islnk()
+                    ):
                         return PackageValidationResult(
                             status=PackageValidationStatus.UNSAFE_PATH,
                             manifest_valid=False,
@@ -877,15 +1034,6 @@ class CasePackageManager:
                             objects_verified=0,
                             objects_corrupted=0,
                             error_message=f"Security violation: unsafe path detected in archive member: {member.name}",
-                        )
-                    if member.issym() or member.islnk():
-                        return PackageValidationResult(
-                            status=PackageValidationStatus.UNSAFE_PATH,
-                            manifest_valid=False,
-                            audit_chain_valid=False,
-                            objects_verified=0,
-                            objects_corrupted=0,
-                            error_message=f"Security violation: archive contains symlink/hardlink: {member.name}",
                         )
                 tar.extractall(extract_temp)
 
@@ -901,6 +1049,16 @@ class CasePackageManager:
                 )
 
             manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            if manifest.get("schema_version") != 1:
+                return PackageValidationResult(
+                    status=PackageValidationStatus.SCHEMA_MISMATCH,
+                    manifest_valid=False,
+                    audit_chain_valid=False,
+                    objects_verified=0,
+                    objects_corrupted=0,
+                    error_message=f"Unsupported package schema version: {manifest.get('schema_version')}",
+                )
+
             files_map = manifest.get("files", {})
             verified = 0
             corrupted = 0
@@ -990,7 +1148,20 @@ class ForensicCaseManager:
         self._lock = threading.RLock()
 
     def _case_path(self, case_id: str) -> Path:
-        return self.cases_dir / sanitize_filename(case_id)
+        sanitized = sanitize_filename(case_id)
+        target = (self.cases_dir / sanitized).resolve()
+        try:
+            target.relative_to(self.cases_dir)
+        except ValueError:
+            raise ValueError(f"Cross-case isolation violation: invalid case_id '{case_id}' resolves outside cases directory.")
+        return target
+
+    def get_vault(self, case_id: str) -> EvidenceVault:
+        with self._lock:
+            cdir = self._case_path(case_id)
+            if not cdir.exists():
+                raise ValueError(f"Case directory does not exist: {case_id}")
+            return EvidenceVault(cdir)
 
     def create_case(
         self,
@@ -1239,6 +1410,12 @@ class ForensicCaseManager:
                 evidence_id=evidence_id,
                 metadata=rec.to_dict(),
             )
+            self._append_audit_event(
+                case_id=case_id,
+                actor=custodian,
+                event_type="CUSTODY_CHANGE",
+                payload=rec.to_dict(),
+            )
             return rec
 
     def list_custody_records(self, case_id: str) -> List[ChainOfCustodyRecord]:
@@ -1252,6 +1429,12 @@ class ForensicCaseManager:
                 return [ChainOfCustodyRecord.from_dict(d) for d in data if isinstance(d, dict)]
             except Exception:
                 return []
+
+    def verify_case_custody(self, case_id: str) -> CustodyVerificationResult:
+        with self._lock:
+            records = self.list_custody_records(case_id)
+            audits = self.get_audit_chain(case_id)
+            return IndependentCustodyVerifier.verify_custody_records(records, audits)
 
     def get_timeline(self, case_id: str) -> List[ForensicTimelineEvent]:
         with self._lock:
@@ -1281,6 +1464,243 @@ class ForensicCaseManager:
         with self._lock:
             events = self.get_audit_chain(case_id)
             return IndependentAuditVerifier.verify_chain(events)
+
+    # ─── Operational Provenance & Verification Helpers ────────────────────────
+
+    def record_recovery_event(
+        self,
+        case_id: str,
+        operation_id: str,
+        evidence_id: str,
+        actor: str,
+        event_type: TimelineEventType,
+        description: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[ForensicTimelineEvent, AuditEvent]:
+        with self._lock:
+            tl = self._record_timeline_event(
+                case_id=case_id,
+                event_type=event_type,
+                actor=actor,
+                description=description,
+                source="RecoveryEngine",
+                operation_id=operation_id,
+                evidence_id=evidence_id,
+                metadata=metadata or {},
+            )
+            aud = self._append_audit_event(
+                case_id=case_id,
+                actor=actor,
+                event_type=event_type.value,
+                payload={"operation_id": operation_id, "evidence_id": evidence_id, "details": metadata or {}},
+                operation_id=operation_id,
+            )
+            return tl, aud
+
+    def record_sanitization_event(
+        self,
+        case_id: str,
+        operation_id: str,
+        evidence_id: str,
+        actor: str,
+        event_type: TimelineEventType,
+        description: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[ForensicTimelineEvent, AuditEvent]:
+        with self._lock:
+            tl = self._record_timeline_event(
+                case_id=case_id,
+                event_type=event_type,
+                actor=actor,
+                description=description,
+                source="SanitizationEngine",
+                operation_id=operation_id,
+                evidence_id=evidence_id,
+                metadata=metadata or {},
+            )
+            aud = self._append_audit_event(
+                case_id=case_id,
+                actor=actor,
+                event_type=event_type.value,
+                payload={"operation_id": operation_id, "evidence_id": evidence_id, "details": metadata or {}},
+                operation_id=operation_id,
+            )
+            return tl, aud
+
+    def record_verification_event(
+        self,
+        case_id: str,
+        operation_id: str,
+        evidence_id: str,
+        actor: str,
+        event_type: TimelineEventType,
+        description: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[ForensicTimelineEvent, AuditEvent]:
+        with self._lock:
+            tl = self._record_timeline_event(
+                case_id=case_id,
+                event_type=event_type,
+                actor=actor,
+                description=description,
+                source="VerificationEngine",
+                operation_id=operation_id,
+                evidence_id=evidence_id,
+                metadata=metadata or {},
+            )
+            aud = self._append_audit_event(
+                case_id=case_id,
+                actor=actor,
+                event_type=event_type.value,
+                payload={"operation_id": operation_id, "evidence_id": evidence_id, "details": metadata or {}},
+                operation_id=operation_id,
+            )
+            return tl, aud
+
+    def record_certificate_event(
+        self,
+        case_id: str,
+        certificate_id: str,
+        operation_id: Optional[str],
+        evidence_id: Optional[str],
+        actor: str,
+        event_type: TimelineEventType,
+        description: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[ForensicTimelineEvent, AuditEvent]:
+        with self._lock:
+            tl = self._record_timeline_event(
+                case_id=case_id,
+                event_type=event_type,
+                actor=actor,
+                description=description,
+                source="CertificateManager",
+                operation_id=operation_id,
+                evidence_id=evidence_id,
+                metadata=metadata or {},
+            )
+            aud = self._append_audit_event(
+                case_id=case_id,
+                actor=actor,
+                event_type=event_type.value,
+                payload={"certificate_id": certificate_id, "operation_id": operation_id, "evidence_id": evidence_id, "details": metadata or {}},
+                operation_id=operation_id,
+            )
+            return tl, aud
+
+    def record_export_event(
+        self,
+        case_id: str,
+        export_path: str,
+        actor: str,
+        description: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[ForensicTimelineEvent, AuditEvent]:
+        with self._lock:
+            tl = self._record_timeline_event(
+                case_id=case_id,
+                event_type=TimelineEventType.EXPORT_CREATED,
+                actor=actor,
+                description=description,
+                source="CasePackageManager",
+                metadata={"export_path": str(export_path), **(metadata or {})},
+            )
+            aud = self._append_audit_event(
+                case_id=case_id,
+                actor=actor,
+                event_type="EXPORT_CREATED",
+                payload={"export_path": str(export_path), **(metadata or {})},
+            )
+            return tl, aud
+
+    def record_recovery_artifact(
+        self,
+        case_id: str,
+        artifact: RecoveryArtifactRecord,
+        actor: str = "Examiner",
+    ) -> RecoveryArtifactRecord:
+        with self._lock:
+            cdir = self._case_path(case_id)
+            rec_file = cdir / "recovered" / "recovery_artifacts.json"
+            rows = []
+            if rec_file.is_file():
+                try:
+                    rows = json.loads(rec_file.read_text(encoding="utf-8"))
+                except Exception:
+                    rows = []
+            rows.append(artifact.to_dict())
+            safe_atomic_json_write(rec_file, rows)
+
+            self.record_recovery_event(
+                case_id=case_id,
+                operation_id=artifact.candidate_id,
+                evidence_id=artifact.source_evidence_id,
+                actor=actor,
+                event_type=TimelineEventType.RECOVERY_COMPLETED,
+                description=f"Recovery candidate '{artifact.candidate_id}' recorded: {artifact.validation_state.value}",
+                metadata=artifact.to_dict(),
+            )
+            return artifact
+
+    def list_recovery_artifacts(self, case_id: str) -> List[RecoveryArtifactRecord]:
+        with self._lock:
+            cdir = self._case_path(case_id)
+            rec_file = cdir / "recovered" / "recovery_artifacts.json"
+            if not rec_file.is_file():
+                return []
+            try:
+                data = json.loads(rec_file.read_text(encoding="utf-8"))
+                return [RecoveryArtifactRecord.from_dict(d) for d in data if isinstance(d, dict)]
+            except Exception:
+                return []
+
+    def record_sanitization_provenance(
+        self,
+        case_id: str,
+        record: SanitizationProvenanceRecord,
+        actor: str = "Examiner",
+    ) -> SanitizationProvenanceRecord:
+        with self._lock:
+            cdir = self._case_path(case_id)
+            san_dir = cdir / "sanitization"
+            san_dir.mkdir(parents=True, exist_ok=True)
+            san_file = san_dir / "sanitization_provenance.json"
+            rows = []
+            if san_file.is_file():
+                try:
+                    rows = json.loads(san_file.read_text(encoding="utf-8"))
+                except Exception:
+                    rows = []
+            rows.append(record.to_dict())
+            safe_atomic_json_write(san_file, rows)
+
+            ev_type = (
+                TimelineEventType.SANITIZATION_COMPLETED
+                if record.execution_status in ("SUCCESS", "SIMULATION_QUALIFIED", "VERIFIED")
+                else TimelineEventType.SANITIZATION_FAILED
+            )
+            self.record_sanitization_event(
+                case_id=case_id,
+                operation_id=record.operation_id,
+                evidence_id=record.evidence_id,
+                actor=actor,
+                event_type=ev_type,
+                description=f"Sanitization operation '{record.operation_id}' recorded: {record.execution_status}",
+                metadata=record.to_dict(),
+            )
+            return record
+
+    def list_sanitization_provenance(self, case_id: str) -> List[SanitizationProvenanceRecord]:
+        with self._lock:
+            cdir = self._case_path(case_id)
+            san_file = cdir / "sanitization" / "sanitization_provenance.json"
+            if not san_file.is_file():
+                return []
+            try:
+                data = json.loads(san_file.read_text(encoding="utf-8"))
+                return [SanitizationProvenanceRecord.from_dict(d) for d in data if isinstance(d, dict)]
+            except Exception:
+                return []
 
     def _record_timeline_event(
         self,
