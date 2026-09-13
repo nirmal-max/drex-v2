@@ -342,7 +342,17 @@ class ZipMember:
     compression_method: int
     crc32: int
     header_offset: int
+    found_at: Optional[int] = None
     is_valid_crc: bool = False
+
+    @property
+    def delta(self) -> Optional[int]:
+        """Image/buffer position minus archive-relative offset.
+        
+        Entries sharing a single delta were stored contiguously in the stream.
+        Distinct deltas indicate distinct fragment runs (adapted from AKHANDA).
+        """
+        return None if self.found_at is None else self.found_at - self.header_offset
 
 
 class ZipCarveStream:
@@ -404,6 +414,28 @@ class ZipCarveStream:
                 fn_end = fn_start + fn_len
                 filename = self.data[fn_start:fn_end].decode("utf-8", errors="replace")
 
+                # Locate matching local header in data buffer
+                actual_found = None
+                if local_hdr_offset + 30 <= len(self.data) and self.data[local_hdr_offset:local_hdr_offset + 4] == b"PK\x03\x04":
+                    (loc_nlen,) = struct.unpack("<H", self.data[local_hdr_offset + 26:local_hdr_offset + 28])
+                    if self.data[local_hdr_offset + 30:local_hdr_offset + 30 + loc_nlen] == filename.encode("utf-8", "replace"):
+                        actual_found = local_hdr_offset
+
+                if actual_found is None:
+                    # Scan for matching LFH in buffer if displaced/fragmented
+                    search_needle = b"PK\x03\x04"
+                    scan_pos = 0
+                    while scan_pos < len(self.data):
+                        scan_pos = self.data.find(search_needle, scan_pos)
+                        if scan_pos == -1 or scan_pos + 30 > len(self.data):
+                            break
+                        (loc_nlen,) = struct.unpack("<H", self.data[scan_pos + 26:scan_pos + 28])
+                        if scan_pos + 30 + loc_nlen <= len(self.data):
+                            if self.data[scan_pos + 30:scan_pos + 30 + loc_nlen] == filename.encode("utf-8", "replace"):
+                                actual_found = scan_pos
+                                break
+                        scan_pos += 1
+
                 member = ZipMember(
                     filename=filename,
                     compressed_size=comp_sz,
@@ -411,13 +443,15 @@ class ZipCarveStream:
                     compression_method=method,
                     crc32=crc,
                     header_offset=local_hdr_offset,
+                    found_at=actual_found,
                 )
 
                 # Validate local header and CRC if within buffer
-                if local_hdr_offset + 30 <= len(self.data):
-                    if self.data[local_hdr_offset:local_hdr_offset + 4] == b"PK\x03\x04":
-                        loc_fn_len, loc_extra_len = struct.unpack("<HH", self.data[local_hdr_offset + 26:local_hdr_offset + 30])
-                        data_start = local_hdr_offset + 30 + loc_fn_len + loc_extra_len
+                loc_offset_to_use = actual_found if actual_found is not None else local_hdr_offset
+                if loc_offset_to_use + 30 <= len(self.data):
+                    if self.data[loc_offset_to_use:loc_offset_to_use + 4] == b"PK\x03\x04":
+                        loc_fn_len, loc_extra_len = struct.unpack("<HH", self.data[loc_offset_to_use + 26:loc_offset_to_use + 30])
+                        data_start = loc_offset_to_use + 30 + loc_fn_len + loc_extra_len
                         data_end = data_start + comp_sz
                         if data_end <= len(self.data):
                             raw_member_data = self.data[data_start:data_end]
@@ -438,6 +472,11 @@ class ZipCarveStream:
                 curr += 1
 
         return len(self.members) > 0
+
+    def get_fragment_deltas(self) -> List[int]:
+        """Return unique deltas across all members to identify distinct fragment runs."""
+        deltas = {m.delta for m in self.members if m.delta is not None}
+        return sorted(list(deltas))
 
     def structural_validity_score(self) -> float:
         """Calculate structural validity of ZIP container."""

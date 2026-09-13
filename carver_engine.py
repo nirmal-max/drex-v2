@@ -148,6 +148,8 @@ class FormatValidator:
         has_idat = False
         has_iend = False
         width, height = 0, 0
+        bit_depth, color_type = 8, 2
+        idat_raw_bytes = bytearray()
 
         while curr + 12 <= len(data):
             try:
@@ -158,8 +160,11 @@ class FormatValidator:
                 if chunk_type == b"IHDR" and chunk_len >= 13:
                     has_ihdr = True
                     width, height = struct.unpack(">II", data[curr + 8:curr + 16])
+                    bit_depth = data[curr + 16]
+                    color_type = data[curr + 17]
                 elif chunk_type == b"IDAT":
                     has_idat = True
+                    idat_raw_bytes.extend(data[curr + 8:curr + 8 + chunk_len])
                 elif chunk_type == b"IEND":
                     has_iend = True
 
@@ -182,10 +187,24 @@ class FormatValidator:
         sig_score = 1.0 if has_iend else 0.5
         meta_score = 1.0 if (width > 0 and height > 0) else 0.2
 
+        # Completeness arithmetic check (adapted from AKHANDA reassemble.py)
+        # Channels: 0: 1 (Greyscale), 2: 3 (RGB), 3: 1 (Indexed), 4: 2 (Greyscale+Alpha), 6: 4 (RGBA)
+        channels_map = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+        channels = channels_map.get(color_type, 3)
+        is_idat_complete = False
+        if has_idat and idat_raw_bytes and width > 0 and height > 0:
+            try:
+                decomp = zlib.decompress(bytes(idat_raw_bytes))
+                expected_bytes = height * (1 + math.ceil(width * channels * bit_depth / 8))
+                if len(decomp) == expected_bytes:
+                    is_idat_complete = True
+            except Exception:
+                pass
+
         evidence = EvidenceScores(
             sig_match=round(sig_score, 2),
-            structure=round(struct_score, 2),
-            continuity=0.9 if has_idat else 0.3,
+            structure=1.0 if (struct_score >= 0.8 and is_idat_complete) else round(struct_score, 2),
+            continuity=1.0 if is_idat_complete else (0.9 if has_idat else 0.3),
             metadata=round(meta_score, 2),
             size_bounded=1.0 if length >= 64 else 0.3,
         )
@@ -196,6 +215,7 @@ class FormatValidator:
             "valid_chunks": valid_chunks,
             "total_chunks": total_chunks,
             "has_iend": has_iend,
+            "idat_complete": is_idat_complete,
         }
         return True, length, evidence, meta
 

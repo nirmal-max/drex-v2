@@ -851,5 +851,56 @@ class TestExplicitSecurityMatrix:
             for pattern in secret_patterns:
                 assert not pattern.search(content), f"Potential secret found in {fpath}"
 
+    def test_zip_carve_stream_deltas_and_fragment_grouping(self):
+        """Test delta property and get_fragment_deltas from AKHANDA zipcarve.py integration."""
+        buf = io.BytesIO()
+        import zipfile
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("doc1.txt", b"Document content 1")
+            zf.writestr("doc2.txt", b"Document content 2")
 
+        zip_data = buf.getvalue()
+        carver = ZipCarveStream(zip_data)
+        assert carver.parse() is True
+        assert len(carver.members) == 2
+        # In a contiguous single-buffer archive, all members have delta = 0
+        assert carver.members[0].delta == 0
+        assert carver.members[1].delta == 0
+        deltas = carver.get_fragment_deltas()
+        assert deltas == [0]
 
+    def test_format_validator_png_idat_pixel_completeness(self):
+        """Test PNG decompressed IDAT pixel arithmetic completeness from AKHANDA reassemble.py."""
+        # Minimal 1x1 8-bit RGBA PNG (width=1, height=1, bit_depth=8, color_type=6)
+        # Expected uncompressed IDAT size = height * (1 + ceil(1 * 4 * 8 / 8)) = 1 * (1 + 4) = 5 bytes
+        # 5 raw bytes: filter_type(0x00) + R(0xFF) + G(0x00) + B(0x00) + A(0xFF)
+        raw_scanline = b"\x00\xff\x00\x00\xff"
+        compressed_idat = zlib.compress(raw_scanline)
+        
+        ihdr_data = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+        ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data)
+        ihdr_chunk = struct.pack(">I", len(ihdr_data)) + b"IHDR" + ihdr_data + struct.pack(">I", ihdr_crc)
+
+        idat_crc = zlib.crc32(b"IDAT" + compressed_idat)
+        idat_chunk = struct.pack(">I", len(compressed_idat)) + b"IDAT" + compressed_idat + struct.pack(">I", idat_crc)
+
+        iend_crc = zlib.crc32(b"IEND")
+        iend_chunk = struct.pack(">I", 0) + b"IEND" + struct.pack(">I", iend_crc)
+
+        valid_png = b"\x89PNG\r\n\x1a\n" + ihdr_chunk + idat_chunk + iend_chunk
+
+        valid, length, evidence, meta = FormatValidator.validate_png(valid_png)
+        assert valid is True
+        assert meta["idat_complete"] is True
+        assert evidence.continuity == 1.0
+        assert evidence.structure == 1.0
+
+        # Incomplete/truncated scanline: only 3 bytes instead of 5
+        corrupted_idat = zlib.compress(b"\x00\xff\x00")
+        corrupted_idat_chunk = struct.pack(">I", len(corrupted_idat)) + b"IDAT" + corrupted_idat + struct.pack(">I", zlib.crc32(b"IDAT" + corrupted_idat))
+        corrupt_png = b"\x89PNG\r\n\x1a\n" + ihdr_chunk + corrupted_idat_chunk + iend_chunk
+
+        valid_c, length_c, evidence_c, meta_c = FormatValidator.validate_png(corrupt_png)
+        assert valid_c is True
+        assert meta_c["idat_complete"] is False
+        assert evidence_c.continuity < 1.0
