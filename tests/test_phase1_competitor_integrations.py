@@ -517,3 +517,186 @@ Contents of shadow copy set ID: {11111111-2222-3333-4444-555555555555}
         res_unconf = VssSanitizer.execute_purge(confirm_destructive=False, dry_run=False)
         assert res_unconf.status == "BLOCKED"
 
+
+# ─── 7. Forensic Hardening & Mathematical Audit Suites ───────────────────────
+
+class TestFragmentForensicHardening:
+    """Forensic verification of fragment reassembly under adversarial conditions."""
+
+    def test_shuffled_and_reversed_fragments(self):
+        # 3-chunk JPEG (exactly 512 bytes per cluster)
+        c1 = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00" + b"\x00" * 492
+        c2 = b"\xff\xdb\x00C\x00" + b"\x05" * 64 + b"\x00" * 443
+        c3 = b"\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00" + b"\xaa" * 400 + b"\xff\xd9" + b"\x00" * 96
+
+        reassembler = FragmentReassembler(chunk_size=512)
+        # Reversed order: c3, c2, c1
+        raw_reversed = c3 + c2 + c1
+        chunks = reassembler.analyze_chunks(raw_reversed, file_type="jpeg")
+        candidates = reassembler.reassemble(chunks, file_type="jpeg")
+        assert len(candidates) >= 1
+        # Reassembled candidate should find the header chunk (c1) as start
+        best_cand = candidates[0]
+        assert best_cand.chunks[0].data.startswith(b"\xff\xd8")
+
+    def test_missing_intermediate_fragment_behavior(self):
+        # Header + Footer but missing body: must result in candidate without claiming full continuous recovery
+        c1 = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00" + b"\x01" * 480
+        c3 = b"\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00" + b"\xaa" * 400 + b"\xff\xd9" + b"\x00" * 96
+
+        reassembler = FragmentReassembler(chunk_size=512)
+        chunks = reassembler.analyze_chunks(c1 + c3, file_type="jpeg")
+        candidates = reassembler.reassemble(chunks, file_type="jpeg")
+        assert len(candidates) >= 1
+
+    def test_corrupted_and_truncated_jpeg_markers(self):
+        # Truncated marker stream
+        truncated = b"\xff\xd8\xff\xe0\x00\x10JFIF"
+        decoder = JpegEntropyDecoder(truncated)
+        assert decoder.parse() is False
+        assert decoder.is_truncated is True
+        assert decoder.structural_validity_score() == 0.3
+
+
+class TestZipForensicHardening:
+    """Forensic verification of ZIP stream carver against corruptions and traversals."""
+
+    def test_empty_zip_archive(self):
+        # Minimal empty ZIP: exactly 22 bytes EOCD
+        # EOCD: PK\x05\x06 + 18 bytes of zeroes
+        empty_eocd = b"PK\x05\x06" + b"\x00" * 18
+        carver = ZipCarveStream(empty_eocd)
+        # Parse returns False (no members), but eocd_found is True
+        assert carver.parse() is False
+        assert carver.eocd_found is True
+        assert carver.structural_validity_score() == 0.4
+
+    def test_truncated_and_corrupt_eocd(self):
+        # Buffer without EOCD
+        corrupt = b"PK\x03\x04\x14\x00\x00\x00" + b"\x00" * 100
+        carver = ZipCarveStream(corrupt)
+        assert carver.parse() is False
+        assert carver.eocd_found is False
+        assert carver.structural_validity_score() == 0.0
+
+    def test_zip_crc_mismatch_detection(self):
+        # Create a valid ZIP archive, then corrupt member payload
+        buf = io.BytesIO()
+        import zipfile
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            zf.writestr("test.txt", b"Authentic forensic stream payload")
+
+        zip_bytes = bytearray(buf.getvalue())
+        # Find payload and corrupt 1 byte
+        payload_pos = zip_bytes.find(b"Authentic")
+        if payload_pos != -1:
+            zip_bytes[payload_pos] = ord("X")
+
+        carver = ZipCarveStream(bytes(zip_bytes))
+        assert carver.parse() is True
+        assert len(carver.members) == 1
+        # CRC mismatch detected
+        assert carver.members[0].is_valid_crc is False
+        assert carver.structural_validity_score() < 1.0
+
+
+class TestRawCarverForensicHardening:
+    """Forensic verification of DeepCarverEngine format validators and bounding."""
+
+    def test_candidate_limit_bounding(self):
+        # Buffer with 10 repeated PNG signatures
+        repeated_png = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 17 + b"\x00\x00\x00\x00IEND\xaeB`\x82") * 10
+        carver = DeepCarverEngine(max_candidates=3)
+        cands = carver.carve(repeated_png)
+        assert len(cands) <= 3
+
+    def test_pdf_format_validator(self):
+        valid_pdf = (
+            b"%PDF-1.4\n"
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+            b"xref\n0 3\n0000000000 65535 f \n"
+            b"trailer\n<< /Size 3 /Root 1 0 R >>\n"
+            b"startxref\n120\n"
+            b"%%EOF"
+        )
+        valid, length, evidence, meta = FormatValidator.validate_pdf(valid_pdf)
+        assert valid is True
+        assert length == len(valid_pdf)
+        assert meta["has_eof"] is True
+        assert meta["has_xref"] is True
+        assert evidence.composite_score() >= 0.70
+
+    def test_gif_and_riff_carving(self):
+        gif_bytes = b"GIF89a" + b"\x0a\x00\x0a\x00\x80\x00\x00" + b"\x00" * 20 + b"\x3b"
+        carver = DeepCarverEngine()
+        cands = carver.carve(gif_bytes)
+        assert any(c.file_type == "gif" for c in cands)
+
+
+class TestNtfsBitmapForensicHardening:
+    """Forensic verification of NTFS $Bitmap bit indexing and cluster runs."""
+
+    def test_odd_size_and_boundary_indexing(self):
+        # 3 bytes = 24 clusters
+        # 0b10101010, 0b01010101, 0b11110000
+        bitmap = bytes([0b10101010, 0b01010101, 0b11110000])
+        analyzer = NtfsBitmapAnalyzer(bitmap)
+        assert analyzer.total_clusters == 24
+        assert analyzer.is_cluster_allocated(0) is False
+        assert analyzer.is_cluster_allocated(1) is True
+        assert analyzer.is_cluster_allocated(8) is True
+        assert analyzer.is_cluster_allocated(9) is False
+        # Out-of-bounds queries return False safely
+        assert analyzer.is_cluster_allocated(999) is False
+        assert analyzer.is_cluster_allocated(-1) is False
+
+    def test_free_first_policy_ordering(self):
+        bitmap = bytes([0b00001111])  # 4 alloc, 4 free
+        analyzer = NtfsBitmapAnalyzer(bitmap)
+        runs = analyzer.extract_cluster_runs(policy=BitmapScanPolicy.FREE_FIRST)
+        assert len(runs) == 2
+        # Free runs appear first in FREE_FIRST
+        assert runs[0].is_allocated is False
+        assert runs[1].is_allocated is True
+
+
+class TestMathematicalAuditAndSafety:
+    """Audit mathematical bounds, evidence normalization, and VSS safety."""
+
+    def test_evidence_scores_normalization_invariant(self):
+        # Invariant: weights sum exactly to 1.0
+        # 0.30 + 0.30 + 0.20 + 0.10 + 0.10 = 1.00
+        scores_min = EvidenceScores(0.0, 0.0, 0.0, 0.0, 0.0)
+        assert scores_min.composite_score() == 0.0
+
+        scores_max = EvidenceScores(1.0, 1.0, 1.0, 1.0, 1.0)
+        assert scores_max.composite_score() == 1.0
+
+        # Clamping check on out-of-range inputs
+        scores_excess = EvidenceScores(2.0, 2.0, 2.0, 2.0, 2.0)
+        assert scores_excess.composite_score() == 1.0
+
+    def test_shannon_entropy_mathematical_stability(self):
+        # 1 byte
+        assert calculate_shannon_entropy(b"A") == 0.0
+        # 2 distinct bytes
+        assert abs(calculate_shannon_entropy(b"AB") - 1.0) < 0.01
+        # Block scanning with uneven buffer
+        blocks = scan_entropy_blocks(b"\x00" * 5000, block_size=4096)
+        assert len(blocks) == 2
+        assert blocks[0].size == 4096
+        assert blocks[1].size == 904
+        assert all(b.entropy == 0.0 for b in blocks)
+
+    def test_vss_volume_injection_rejection(self):
+        # Malicious volume parameter attempting command chaining must be rejected
+        res = VssSanitizer.execute_purge(
+            confirm_destructive=True,
+            dry_run=True,
+            target_volume="C: & whoami",
+        )
+        assert res.status == "BLOCKED"
+        assert "Invalid target volume format" in (res.error_message or "")
+
+

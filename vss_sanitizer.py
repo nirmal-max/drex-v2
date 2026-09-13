@@ -155,7 +155,21 @@ class VssSanitizer:
         is_elevated = cls.is_admin()
 
         if dry_run:
-            cmd = f"vssadmin delete shadows /for={target_volume} /quiet" if target_volume else "vssadmin delete shadows /all /quiet"
+            vol_arg = ""
+            if target_volume:
+                vol_clean = target_volume.strip()
+                if not re.match(r"^[A-Za-z]:\\?$", vol_clean):
+                    return VssPurgeResult(
+                        status="BLOCKED",
+                        is_elevated=is_elevated,
+                        shadows_targeted=0,
+                        shadows_purged=0,
+                        command_executed="none",
+                        output="",
+                        error_message=f"Invalid target volume format '{target_volume}'. Expected drive specifier like 'C:'.",
+                    )
+                vol_arg = f" /for={vol_clean[:2]}"
+            cmd = f"vssadmin delete shadows{vol_arg or ' /all'} /quiet"
             return VssPurgeResult(
                 status="DRY_RUN",
                 is_elevated=is_elevated,
@@ -202,7 +216,18 @@ class VssSanitizer:
         # Real execution path (Windows + Elevated + Confirmed + Non-dry-run)
         cmd = ["vssadmin", "delete", "shadows"]
         if target_volume:
-            cmd.extend([f"/for={target_volume}", "/quiet"])
+            vol_clean = target_volume.strip()
+            if not re.match(r"^[A-Za-z]:\\?$", vol_clean):
+                return VssPurgeResult(
+                    status="BLOCKED",
+                    is_elevated=is_elevated,
+                    shadows_targeted=0,
+                    shadows_purged=0,
+                    command_executed="none",
+                    output="",
+                    error_message=f"Invalid target volume format '{target_volume}'. Expected drive specifier like 'C:'.",
+                )
+            cmd.extend([f"/for={vol_clean[:2]}", "/quiet"])
         else:
             cmd.extend(["/all", "/quiet"])
 

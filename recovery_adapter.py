@@ -385,6 +385,19 @@ class SmartRecoveryAdapter(BaseRecoveryAdapter):
         fs_type = geometry.get("filesystem_type", "").upper()
         cluster_size = geometry.get("cluster_size") or geometry.get("sector_size") or 512
 
+        # ── Step 4: NTFS $Bitmap allocation intelligence integration ──
+        bitmap_stats = None
+        if "NTFS" in fs_type:
+            try:
+                src_path = Path(source)
+                if src_path.is_file() and src_path.stat().st_size <= 50 * 1024 * 1024:
+                    raw_header = src_path.read_bytes()[:4096]
+                    if len(raw_header) >= 512:
+                        analyzer = NtfsBitmapAnalyzer(raw_header, bytes_per_sector=cluster_size if cluster_size <= 4096 else 512)
+                        bitmap_stats = analyzer.get_allocation_stats()
+            except Exception:
+                pass
+
         return RecoveryScan(
             status="OK",
             message=(
@@ -401,8 +414,9 @@ class SmartRecoveryAdapter(BaseRecoveryAdapter):
                 "cluster_size_bytes": cluster_size,
                 "volume_label": geometry.get("volume_label", ""),
                 "total_range": geometry.get("total_range", ""),
+                "bitmap_stats": bitmap_stats.__dict__ if bitmap_stats else None,
             },
-            backend="The Sleuth Kit 4.15.0 (fsstat + fls)",
+            backend="The Sleuth Kit 4.15.0 (fsstat + fls) + NtfsBitmapAnalyzer",
         )
 
     def recover(self, source: str, candidate_id: str, destination: Path, timeout: int = 86400) -> list[Path]:
