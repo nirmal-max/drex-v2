@@ -25,6 +25,8 @@ import tkinter as tk
 from typing import Any, Callable
 
 from recovery_adapter import QuickRecoveryAdapter, RecoveryDispatcher, RecoveryError, RecoveryScan
+from entropy_engine import calculate_shannon_entropy, evaluate_sanitization_entropy
+from vss_sanitizer import VssSanitizer
 
 
 APP_NAME = "DREX"
@@ -624,6 +626,13 @@ class VerificationEngine:
           UNSUPPORTED      — hardware/adapter cannot verify
         """
         warnings: list[str] = []
+
+        if evidence.get("entropy_evaluation"):
+            ee = evidence["entropy_evaluation"]
+            if hasattr(ee, "evidence_notes") and ee.evidence_notes:
+                warnings.append(f"Entropy signal: {ee.evidence_notes}")
+            elif isinstance(ee, dict) and ee.get("evidence_notes"):
+                warnings.append(f"Entropy signal: {ee['evidence_notes']}")
 
         # Backend already set a canonical verification_status
         v = evidence.get("verification_status", "") or ""

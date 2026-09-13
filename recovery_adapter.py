@@ -25,6 +25,9 @@ from recovery_backends import (
     backend_status,
     find_backend_executable,
 )
+from fragment_engine import FragmentReassembler, JpegEntropyDecoder, ZipCarveStream
+from carver_engine import DeepCarverEngine, EvidenceScores
+from fs_bitmap import NtfsBitmapAnalyzer, BitmapScanPolicy
 
 
 class TargetKind(str, Enum):

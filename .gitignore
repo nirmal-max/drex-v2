@@ -14,6 +14,7 @@ native_bin/drex_recovery_out/
 build/pyinstaller/
 build/dist/
 build/native/
+build/pytest_temp/
 __pycache__/
 *.pyc
 *.pyo
