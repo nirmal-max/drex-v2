@@ -117,3 +117,22 @@ This ledger documents every external component selected for active code reuse, r
 - **Test Coverage**: `tests/test_ui_pages.py`
 - **Integration Decision**: `REUSE_WITH_ADAPTATION`
 - **Integration Status**: `VERIFIED`
+
+---
+
+### 7. Native Hardware Storage & ATA/NVMe Controller Engine
+- **Source Repository**: `KodyDennon/DriveWipe`
+- **Source File(s)**: `crates/drivewipe-core/src/wipe/firmware/ata.rs`, `crates/drivewipe-core/src/wipe/firmware/nvme.rs`, `crates/drivewipe-core/src/drive/windows.rs`
+- **Class / Function**: `IOCTL_ATA_PASS_THROUGH`, `IOCTL_STORAGE_PROTOCOL_COMMAND`, `IOCTL_STORAGE_QUERY_PROPERTY`, `AtaPassThroughEx`, `StorageProtocolCommand`, `StorageDeviceDescriptor`
+- **Original Purpose**: Low-level Windows DeviceIoControl firmware sanitize and secure erase passthrough.
+- **DREX Purpose**: Powers DREX native hardware methods (ATA Secure Erase, NVMe Format/Sanitize, USB bridge containment, and freeze lock safety gates).
+- **License**: MIT / Permissive (`Copyright (c) 2026 DriveWipe Contributors`)
+- **Provenance & Upstream Origin**: Kody Dennon & DriveWipe contributors (commit `9b3f62c` / `v2.0.5`).
+- **Attribution Obligation**: Retain copyright notice in `THIRD_PARTY_NOTICES.md` and module header.
+- **Dependencies**: Python standard library (`ctypes`, `enum`, `struct`).
+- **Code Reused**: 320 lines of IOCTL structure definitions, opcode packing, and safety protocols adapted into Python.
+- **Code Modified**: Isolated into `hardware_storage.py` with mockable capability descriptor injection and strict simulation vs physical distinction.
+- **DREX Location**: `hardware_storage.py` & `drex_app.py`
+- **Test Coverage**: `tests/test_native_sanitization_hardware.py`
+- **Integration Decision**: `REUSE_WITH_ADAPTATION`
+- **Integration Status**: `VERIFIED`

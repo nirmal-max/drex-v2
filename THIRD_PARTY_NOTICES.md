@@ -28,4 +28,5 @@ No third-party binary is fabricated or redistributed by the current build.
 | Shannon Entropy Engine | SecureForge & devil-net | MIT / Apache 2.0 | Physics-based sector entropy calculation in `entropy_engine.py` |
 | NTFS $Bitmap Analyzer | ForensiX / SIH26 (`v1.0.4`) | MIT License | Cluster allocation bitfield traversal and policy engine in `fs_bitmap.py` |
 | VSS Sanitizer Gating | EraseXperts (`v3.0.1`) | MIT License | Non-destructive VSS discovery and safety-gated purge in `vss_sanitizer.py` |
+| Native ATA/NVMe Storage Engine | DriveWipe (`9b3f62c` / `v2.0.5`) | MIT Permissive | Win32 IOCTL storage structures, ATA pass-through, and NVMe admin sanitization in `hardware_storage.py` |
 
