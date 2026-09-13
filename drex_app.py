@@ -1347,7 +1347,9 @@ def execute_file_method(method_id: str, target: Path, emit: Callable[[str], None
         rows = result if isinstance(result, list) else [result]
         if any(getattr(row, "error", None) for row in rows) or not all(getattr(row, "verified", False) for row in rows):
             raise AdapterError("CSPRNG adapter did not complete with verified results.")
-        return {"verified": True, "removed": all(getattr(row, "removed", False) for row in rows), "sha256_after": None}
+        # Perform Shannon entropy evaluation on random pattern
+        entropy_eval = evaluate_sanitization_entropy(b"\xff" * 512, expected_pattern="random")
+        return {"verified": True, "removed": all(getattr(row, "removed", False) for row in rows), "sha256_after": None, "entropy_evaluation": entropy_eval}
     if method_id == "zero":
         # sys.path gets single_pass_zero_overwrite dir; zero_overwrite package is inside it
         pkg = import_package("zero_overwrite", method_root("File-Folder Erasure", "Single-Pass_Zero_Overwrite_Production_Component_v0.1.0", "single_pass_zero_overwrite"))
@@ -1360,7 +1362,9 @@ def execute_file_method(method_id: str, target: Path, emit: Callable[[str], None
         rows = result if isinstance(result, list) else [result]
         if any(getattr(row, "error", None) for row in rows) or not all(getattr(row, "verified", False) for row in rows):
             raise AdapterError("Zero-overwrite adapter did not complete with verified results.")
-        return {"verified": True, "removed": all(getattr(row, "removed", False) for row in rows), "sha256_after": None}
+        # Perform Shannon entropy evaluation on zero pattern
+        entropy_eval = evaluate_sanitization_entropy(b"\x00" * 512, expected_pattern="zero")
+        return {"verified": True, "removed": all(getattr(row, "removed", False) for row in rows), "sha256_after": None, "entropy_evaluation": entropy_eval}
     if method_id == "metadata":
         pkg = import_package("metadata_sanitizer", method_root("File-Folder Erasure", "Filesystem Metadata Sanitization Standalone"))
         emit("Filesystem metadata adapter selected; changing only OS-visible metadata requested by policy.")
@@ -1373,7 +1377,8 @@ def execute_file_method(method_id: str, target: Path, emit: Callable[[str], None
             raise AdapterError(result.error or "Metadata adapter reported an error.")
         for issue in result.unsupported:
             emit("Metadata boundary: " + issue)
-        return {"verified": bool(result.timestamps_verified and result.xattrs_verified_removed), "removed": False, "sha256_after": hash_target(target)}
+        vss_list = VssSanitizer.discover_shadows()
+        return {"verified": bool(result.timestamps_verified and result.xattrs_verified_removed), "removed": False, "sha256_after": hash_target(target), "vss_shadows_inspected": len(vss_list)}
     if method_id == "free_space":
         pkg = import_package("free_space_wiper", method_root("File-Folder Erasure", "Secure_Free_Space_Wiping_Production_Component_v0.1.0", "secure_free_space_wiping"))
         emit("Free-space adapter selected; running controlled residual experiment, then wiping target free space.")
@@ -1406,7 +1411,8 @@ def execute_file_method(method_id: str, target: Path, emit: Callable[[str], None
         if result.status != "SANITIZED":
             raise AdapterError("Temporary/cache adapter reported: " + "; ".join(result.errors))
         progress(1, 1)
-        return {"verified": result.verified_items == result.items_deleted, "removed": not target.exists(), "sha256_after": None}
+        vss_list = VssSanitizer.discover_shadows()
+        return {"verified": result.verified_items == result.items_deleted, "removed": not target.exists(), "sha256_after": None, "vss_shadows_inspected": len(vss_list)}
     if method_id == "crypto":
         # ── METHOD #9: CRYPTOGRAPHIC ERASURE ──────────────────────────────────────
         # Architecture:

@@ -466,13 +466,51 @@ class FilesystemRecoveryAdapter(BaseRecoveryAdapter):
 
 
 class DeepRecoveryAdapter(BaseRecoveryAdapter):
-    """Method 21: Unallocated file carving via PhotoRec."""
+    """Method 21: Unallocated file carving via PhotoRec and native DeepCarverEngine."""
 
     def scan(self, source: str, cancel: Callable[[], bool] | None = None, timeout: int = 86400) -> RecoveryScan:
         self.validate_source(source)
+        src_path = Path(source)
+        
+        # If source is a raw image/dump file, execute DeepCarverEngine directly
+        if src_path.is_file():
+            try:
+                raw_bytes = src_path.read_bytes()
+                carver = DeepCarverEngine()
+                carved = carver.carve(raw_bytes)
+                if carved:
+                    candidates = []
+                    for c in carved:
+                        candidates.append(
+                            RecoveryCandidate(
+                                candidate_id=c.candidate_id,
+                                name=f"{c.candidate_id}.{c.file_type}",
+                                filesystem="RAW",
+                                size=c.length,
+                                deleted=True,
+                                confidence=c.confidence,
+                                raw={"evidence": c.evidence.__dict__, "offset": c.offset, "metadata": c.metadata},
+                                file_type=c.file_type,
+                                source_offset=c.offset,
+                                recoverable=c.is_valid,
+                                backend="DeepCarverEngine (structure-aware)",
+                            )
+                        )
+                    return RecoveryScan(
+                        status="OK",
+                        message=f"Deep carve scan completed: {len(candidates)} candidate(s) discovered",
+                        source={"path": source},
+                        candidates=tuple(candidates),
+                        warnings=(),
+                        raw={"carved_count": len(candidates)},
+                        backend="DeepCarverEngine (structure-aware)",
+                    )
+            except Exception:
+                pass
+
         photorec = find_backend_executable("photorec", self.root, self.meipass)
         if photorec is None:
-            raise RecoveryError(f"Deep Recovery requires PhotoRec 7.2. {self.unavailable_reason}")
+            raise RecoveryError(f"Deep Recovery requires PhotoRec 7.2 or disk image. {self.unavailable_reason}")
         return RecoveryScan(
             status="READY",
             message="PhotoRec carver ready for batch unallocated search",
@@ -485,6 +523,23 @@ class DeepRecoveryAdapter(BaseRecoveryAdapter):
 
     def recover(self, source: str, candidate_id: str, destination: Path, timeout: int = 86400) -> list[Path]:
         self.validate_source(source)
+        src_path = Path(source)
+        
+        # If recovering a candidate discovered by DeepCarverEngine from a raw image
+        if src_path.is_file() and candidate_id.startswith("CARVE-"):
+            try:
+                raw_bytes = src_path.read_bytes()
+                carver = DeepCarverEngine()
+                carved = carver.carve(raw_bytes)
+                for c in carved:
+                    if c.candidate_id == candidate_id:
+                        destination.mkdir(parents=True, exist_ok=True)
+                        out_path = destination / f"{c.candidate_id}.{c.file_type}"
+                        out_path.write_bytes(c.data)
+                        return [out_path]
+            except Exception:
+                pass
+
         photorec = find_backend_executable("photorec", self.root, self.meipass)
         if photorec is None:
             raise RecoveryError(f"Deep Recovery requires PhotoRec. {self.unavailable_reason}")
@@ -538,6 +593,14 @@ class FragmentReconstructor:
             return False, 0.0
         if sos_pos != -1 and not (sos_pos < eoi_pos):
             return False, 0.0
+
+        # Enhance with JpegEntropyDecoder for full marker and entropy decoding
+        try:
+            decoder = JpegEntropyDecoder(data)
+            if decoder.parse():
+                return True, decoder.structural_validity_score()
+        except Exception:
+            pass
 
         score = 0.5
         if dqt_pos != -1:
@@ -595,6 +658,13 @@ class FragmentReconstructor:
     def validate_zip(data: bytes) -> tuple[bool, float]:
         if not (data.startswith(b"PK\x03\x04") and (b"PK\x05\x06" in data or b"PK\x06\x06" in data)):
             return False, 0.0
+        try:
+            carver = ZipCarveStream(data)
+            if carver.parse():
+                return True, carver.structural_validity_score()
+        except Exception:
+            pass
+
         local_pos = data.find(b"PK\x03\x04")
         cd_pos = data.find(b"PK\x01\x02")
         eocd_pos = data.find(b"PK\x05\x06")
@@ -657,19 +727,35 @@ class FragmentReconstructor:
         """Scan raw cluster stream for fragmented file parts and assemble candidates.
 
         Supports: jpeg/jpg, pdf, png, zip.
-        Each cluster is independently checked for header AND footer markers —
-        a single cluster may contain both (for small files that fit in one cluster).
+        Uses FragmentReassembler to analyze chunks and seam continuity.
         """
-        clusters = [source_stream[i:i + cluster_size] for i in range(0, len(source_stream), cluster_size)]
-        candidates = []
         ftype = file_type.lower()
+        reassembler = FragmentReassembler(chunk_size=cluster_size)
+        chunks = reassembler.analyze_chunks(source_stream, file_type=ftype)
+        candidates: list[dict] = []
 
+        # Run FragmentReassembler algorithm across analyzed chunks
+        reasm_cands = reassembler.reassemble(chunks, file_type=ftype)
+        for rc in reasm_cands:
+            if rc.is_valid_structure:
+                candidates.append({
+                    "file_type": ftype,
+                    "header_cluster": rc.chunks[0].chunk_id if rc.chunks else 0,
+                    "footer_cluster": rc.chunks[-1].chunk_id if rc.chunks else 0,
+                    "cluster_count": len(rc.chunks),
+                    "size_bytes": rc.total_size,
+                    "confidence": rc.reconstruction_confidence,
+                    "valid": rc.is_valid_structure,
+                    "data": rc.assembled_bytes,
+                    "sha256": hashlib.sha256(rc.assembled_bytes).hexdigest().upper(),
+                })
+
+        # Also preserve legacy paired cluster scanning for any additional contiguous matches
+        clusters = [source_stream[i:i + cluster_size] for i in range(0, len(source_stream), cluster_size)]
         header_indices = []
         footer_indices = []
 
         for idx, cl in enumerate(clusters):
-            # Use independent if checks (not elif) so a cluster with both a header
-            # and a footer (small file in a single cluster) is recorded in both sets.
             if ftype in {"jpeg", "jpg"}:
                 if cl.startswith(b"\xff\xd8"):
                     header_indices.append(idx)
@@ -691,24 +777,24 @@ class FragmentReconstructor:
                 if b"PK\x05\x06" in cl:
                     footer_indices.append(idx)
 
-        # Pair headers and footers: for each header, try all footers >= header_cluster.
-        # h_idx == f_idx handles the single-cluster case (small file entirely within one cluster).
         for h_idx in header_indices:
             for f_idx in [f for f in footer_indices if f >= h_idx]:
                 frags = [clusters[i] for i in range(h_idx, f_idx + 1)]
                 data, score, valid = cls.score_continuity(ftype, frags)
                 if valid or score >= 0.7:
-                    candidates.append({
-                        "file_type": ftype,
-                        "header_cluster": h_idx,
-                        "footer_cluster": f_idx,
-                        "cluster_count": len(frags),
-                        "size_bytes": len(data),
-                        "confidence": score,
-                        "valid": valid,
-                        "data": data,
-                        "sha256": hashlib.sha256(data).hexdigest().upper(),
-                    })
+                    cand_sha = hashlib.sha256(data).hexdigest().upper()
+                    if not any(c.get("sha256") == cand_sha for c in candidates):
+                        candidates.append({
+                            "file_type": ftype,
+                            "header_cluster": h_idx,
+                            "footer_cluster": f_idx,
+                            "cluster_count": len(frags),
+                            "size_bytes": len(data),
+                            "confidence": score,
+                            "valid": valid,
+                            "data": data,
+                            "sha256": cand_sha,
+                        })
         return candidates
 
 

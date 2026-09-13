@@ -363,3 +363,157 @@ class TestRuntimeIntegration:
         status, warnings = VerificationEngine.assess(evidence)
         assert status == "VERIFIED"
         assert any("Entropy signal:" in w for w in warnings)
+
+    def test_end_to_end_raw_carving_runtime_pipeline(self, tmp_path: Path):
+        """Pipeline A: Synthetic Raw Carving via DeepRecoveryAdapter."""
+        from recovery_adapter import DeepRecoveryAdapter, RECOVERY_METHOD_SPECS
+        
+        # Construct synthetic disk image with embedded PNG and SQLite
+        img_file = tmp_path / "synthetic_disk.raw"
+        padding = b"\x00" * 512
+        png_data = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 13 + b"\x00" * 4 + b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        sqlite_data = bytearray(512)
+        sqlite_data[0:16] = b"SQLite format 3\x00"
+        struct.pack_into(">H", sqlite_data, 16, 512)
+        struct.pack_into(">I", sqlite_data, 28, 1)
+
+        img_file.write_bytes(padding + png_data + padding + bytes(sqlite_data) + padding)
+
+        spec = next(s for s in RECOVERY_METHOD_SPECS if s.method_id == "deep")
+        adapter = DeepRecoveryAdapter(spec, tmp_path, tmp_path)
+
+        # 1. Discovery & Scan
+        scan_res = adapter.scan(str(img_file))
+        assert scan_res.status == "OK"
+        assert len(scan_res.candidates) >= 2
+        assert any(c.file_type == "png" for c in scan_res.candidates)
+        assert any(c.file_type == "sqlite" for c in scan_res.candidates)
+
+        # 2. Candidate Validation & Evidence
+        png_cand = next(c for c in scan_res.candidates if c.file_type == "png")
+        assert png_cand.recoverable is True
+        assert png_cand.confidence >= 0.50
+
+        # 3. Recovery Extraction
+        out_dir = tmp_path / "recovered_carve"
+        recovered = adapter.recover(str(img_file), png_cand.candidate_id, out_dir)
+        assert len(recovered) == 1
+        assert recovered[0].is_file()
+        assert recovered[0].read_bytes() == png_data
+
+    def test_end_to_end_fragment_reconstruction_runtime_pipeline(self, tmp_path: Path):
+        """Pipeline B: Synthetic Fragment Reconstruction via FragmentRecoveryAdapter."""
+        from recovery_adapter import FragmentRecoveryAdapter, RECOVERY_METHOD_SPECS
+
+        img_file = tmp_path / "frag_image.raw"
+        header = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00" + b"\x00" * 480
+        body = b"\xff\xdb\x00C\x00" + b"\x05" * 64 + b"\x00" * 441
+        footer = b"\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00?\x00" + b"\xaa" * 400 + b"\xff\xd9" + b"\x00" * 96
+
+        # Write 3 clusters of 512 bytes
+        img_file.write_bytes(header + body + footer)
+
+        spec = next(s for s in RECOVERY_METHOD_SPECS if s.method_id == "fragment")
+        adapter = FragmentRecoveryAdapter(spec, tmp_path, tmp_path, file_type="jpeg")
+
+        # 1. Scan
+        scan_res = adapter.scan(str(img_file), file_type="jpeg")
+        assert scan_res.status == "READY"
+
+        # 2. Recovery & Reassembly
+        out_dir = tmp_path / "recovered_frags"
+        recovered = adapter.recover(str(img_file), "dummy_cand", out_dir, file_type="jpeg", cluster_size=512)
+        assert len(recovered) >= 1
+        rec_data = recovered[0].read_bytes()
+        assert rec_data.startswith(b"\xff\xd8")
+        assert b"\xff\xd9" in rec_data
+
+    def test_end_to_end_verification_runtime_pipeline(self):
+        """Pipeline C: Synthetic Data to DREX Verification Path."""
+        # 1. Constant Zero Pattern
+        zero_buf = b"\x00" * 8192
+        zero_eval = evaluate_sanitization_entropy(zero_buf, expected_pattern="zero")
+        assert zero_eval.verdict == "PASSED"
+
+        evidence_zero = {
+            "verification_status": "VERIFIED",
+            "bytes_verified": 8192,
+            "disk_size_bytes": 8192,
+            "entropy_evaluation": zero_eval,
+        }
+        status, warnings = VerificationEngine.assess(evidence_zero)
+        assert status == "VERIFIED"
+        assert any("Verified uniform constant pattern" in w for w in warnings)
+
+        # 2. CSPRNG Random Pattern
+        import secrets
+        rand_buf = secrets.token_bytes(8192)
+        rand_eval = evaluate_sanitization_entropy(rand_buf, expected_pattern="random")
+        assert rand_eval.verdict in ("PASSED", "PASSED_WITH_WARNING")
+
+        evidence_rand = {
+            "verification_status": "VERIFIED",
+            "bytes_verified": 8192,
+            "disk_size_bytes": 8192,
+            "entropy_evaluation": rand_eval,
+        }
+        status_r, warnings_r = VerificationEngine.assess(evidence_rand)
+        assert status_r == "VERIFIED"
+
+    def test_end_to_end_ntfs_bitmap_runtime_pipeline(self):
+        """Pipeline D: Synthetic NTFS Bitmap Multi-Policy Allocation."""
+        # 32 bytes = 256 clusters
+        bitmap = bytearray(32)
+        # Cluster 0..15 allocated (2 bytes of 0xFF)
+        bitmap[0] = 0xFF
+        bitmap[1] = 0xFF
+        # Cluster 16..31 free (2 bytes of 0x00)
+        bitmap[2] = 0x00
+        bitmap[3] = 0x00
+        # Cluster 32..47 allocated (2 bytes of 0xFF)
+        bitmap[4] = 0xFF
+        bitmap[5] = 0xFF
+
+        analyzer = NtfsBitmapAnalyzer(bytes(bitmap), bytes_per_sector=512, sectors_per_cluster=8)
+        stats = analyzer.get_allocation_stats()
+        assert stats.total_clusters == 256
+        assert stats.allocated_clusters == 32
+        assert stats.free_clusters == 224
+
+        # Verify FREE_ONLY policy extracts only free runs
+        free_runs = analyzer.extract_cluster_runs(policy=BitmapScanPolicy.FREE_ONLY)
+        assert all(not r.is_allocated for r in free_runs)
+        assert sum(r.length for r in free_runs) == 224
+
+        # Verify FULL_VOLUME policy spans total clusters
+        full_runs = analyzer.extract_cluster_runs(policy=BitmapScanPolicy.FULL_VOLUME)
+        assert len(full_runs) == 1
+        assert full_runs[0].length == 256
+
+    def test_end_to_end_vss_safety_runtime_pipeline(self):
+        """Pipeline E: VSS Discovery, Reporting, and Non-Destructive Safety Gates."""
+        # 1. Discovery on Mock Output
+        mock_output = """
+Contents of shadow copy set ID: {11111111-2222-3333-4444-555555555555}
+   Contained 1 shadow copies at creation time: 9/13/2026 10:00:00 PM
+      Shadow Copy ID: {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}
+      Original Volume: (C:)\\?\\Volume{00000000-0000-0000-0000-000000000000}\\
+      Creation Time: 9/13/2026 10:00:00 PM
+"""
+        shadows = VssSanitizer.discover_shadows(command_output=mock_output)
+        assert len(shadows) == 1
+
+        # 2. Plan Generation
+        plan = VssSanitizer.create_purge_plan(shadows=shadows)
+        assert plan.target_count == 1
+        assert plan.requires_confirmation is True
+
+        # 3. Dry-Run Execution (Guaranteed Non-Destructive)
+        res_dry = VssSanitizer.execute_purge(confirm_destructive=True, dry_run=True, target_volume="C:")
+        assert res_dry.status == "DRY_RUN"
+        assert res_dry.shadows_purged == 0
+
+        # 4. Blocked when Unconfirmed
+        res_unconf = VssSanitizer.execute_purge(confirm_destructive=False, dry_run=False)
+        assert res_unconf.status == "BLOCKED"
+
