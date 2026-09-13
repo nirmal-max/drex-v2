@@ -313,6 +313,8 @@ class OperationContext:
     emit:           Callable[[str], None]        # puts (EV_LOG, msg) on queue
     progress:       Callable[[int, int], None]   # puts (EV_PROGRESS, (done, total))
     metadata:       dict[str, Any]               # caps, capacity_kind, serial, model…
+    case_id:        str | None = None
+    evidence_id:    str | None = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -338,6 +340,8 @@ class OperationResult:
     certificate_id:    str | None = None
     certificate_path:  str | None = None
     error:             str | None = None
+    case_id:           str | None = None
+    evidence_id:       str | None = None
 
 
 
