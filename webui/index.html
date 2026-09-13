@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b63ce">
+  <title>DREX V2 — Assurance Workstation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">D</div>
+        <div>
+          <strong>DREX</strong>
+          <span>SIH26149 · NTRO Forensic</span>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Primary">
+        <button class="nav-item active" data-view="overview">✦ <span>Showcase & Story</span></button>
+        <button class="nav-item" data-view="cases">▣ <span>Cases & Timeline</span></button>
+        <button class="nav-item" data-view="recovery">⌕ <span>Forensic Recovery</span></button>
+        <button class="nav-item" data-view="carving">◈ <span>Raw File Carving</span></button>
+        <button class="nav-item" data-view="sanitize">◇ <span>Sanitization & Eraser</span></button>
+        <button class="nav-item" data-view="methods">☷ <span>25 Method Matrix</span></button>
+        <button class="nav-item" data-view="device">◉ <span>Device Intelligence</span></button>
+        <button class="nav-item" data-view="audit">▤ <span>Audit Chain</span></button>
+        <button class="nav-item" data-view="vault">▣ <span>Evidence Vault</span></button>
+        <button class="nav-item" data-view="verify">✓ <span>Independent Verifier</span></button>
+        <button class="nav-item" data-view="validation">◌ <span>Validation Lab</span></button>
+        <button class="nav-item" data-view="reports">▤ <span>Reports</span></button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="demo-title">DEMO QUICK-ACTIONS</div>
+        <button class="secondary-action" id="seedDemo">● Seed Demonstration Case</button>
+        <div class="system-status">
+          <span><i class="dot good"></i> Capability Engine</span>
+          <span><i class="dot good"></i> Evidence Core</span>
+          <span><i class="dot good"></i> Recovery Read-Only</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="breadcrumbs">Workstation <b>/</b> <span id="viewName">Showcase & Story</span> <em>No case selected</em></div>
+        <div class="top-actions">
+          <span class="pill amber">● Judge Demo Flow</span>
+          <span class="pill blue">✦ Assurance Lab</span>
+          <span class="pill"><i class="dot good"></i> Network Offline</span>
+          <button class="icon-button" id="refresh">↻</button>
+        </div>
+      </header>
+
+      <section id="appView" class="content"></section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
