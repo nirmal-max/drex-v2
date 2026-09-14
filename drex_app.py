@@ -5504,24 +5504,47 @@ def main(argv: list[str] | None = None) -> int:
                     port = int(a.split("=")[1])
                 except ValueError:
                     pass
-        print(f"Starting DREX-V2 Multi-Surface Forensic Server on http://127.0.0.1:{port} ...")
-        uvicorn.run("drex_server:app", host="127.0.0.1", port=port, log_level="info")
-        return 0
+        try:
+            print(f"Starting DREX-V2 Multi-Surface Forensic Server on http://127.0.0.1:{port} ...")
+            config = uvicorn.Config("drex_server:app", host="127.0.0.1", port=port, log_level="info")
+            server = uvicorn.Server(config)
+            server.run()
+            return 0
+        except OSError as ex:
+            print(f"DREX-V2 Port Collision Error: Port {port} is already in use. Details: {ex}", file=sys.stderr)
+            return 1
     if "--web" in argv:
         import threading
         import webbrowser
         import uvicorn
         port = 8765
-        t = threading.Thread(target=lambda: uvicorn.run("drex_server:app", host="127.0.0.1", port=port, log_level="warning"), daemon=True)
-        t.start()
-        time.sleep(1.0)
-        webbrowser.open(f"http://127.0.0.1:{port}/")
-        print(f"DREX-V2 Web Console running at http://127.0.0.1:{port}/ (Press Ctrl+C to stop)")
+        for a in argv:
+            if a.startswith("--port="):
+                try:
+                    port = int(a.split("=")[1])
+                except ValueError:
+                    pass
         try:
-            while True:
-                time.sleep(1.0)
-        except KeyboardInterrupt:
+            config = uvicorn.Config("drex_server:app", host="127.0.0.1", port=port, log_level="warning")
+            server = uvicorn.Server(config)
+            t = threading.Thread(target=server.run, daemon=True)
+            t.start()
+            time.sleep(1.2)
+            if not t.is_alive():
+                print(f"DREX-V2 Port Collision Error: Port {port} could not be bound.", file=sys.stderr)
+                return 1
+            webbrowser.open(f"http://127.0.0.1:{port}/")
+            print(f"DREX-V2 Web Console running at http://127.0.0.1:{port}/ (Press Ctrl+C to stop)")
+            try:
+                while t.is_alive():
+                    time.sleep(0.5)
+            except KeyboardInterrupt:
+                server.should_exit = True
+                return 0
             return 0
+        except Exception as ex:
+            print(f"Error starting DREX web console on port {port}: {ex}", file=sys.stderr)
+            return 1
     if "--version" in argv:
         print(f"{APP_NAME} {VERSION}")
         return 0

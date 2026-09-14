@@ -99,7 +99,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ROOT_DIR = pathlib.Path(__file__).resolve().parent
+ROOT_DIR = pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(__file__).resolve().parent))
 WEBUI_DIR = ROOT_DIR / "webui"
 VAULT_DIR = ROOT_DIR / "drex_data" / "vault"
 VAULT_DIR.mkdir(parents=True, exist_ok=True)
@@ -139,26 +139,57 @@ ws_manager = ConnectionManager()
 # ─── Authentication Dependency ────────────────────────────────────────────────
 
 def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    """Validate bearer token from header or fallback to demo persona."""
+    """Validate bearer token from Authorization header."""
     if not authorization:
-        # Default to JUDGE_DEMO for seamless local exploration
-        return {
-            "sub": "judge_demo",
-            "display_name": "SIH 2026 Evaluation Committee Judge",
-            "role": models.UserRole.JUDGE_DEMO.value,
-            "permissions": sorted(list(rbac.ROLE_PERMISSIONS[models.UserRole.JUDGE_DEMO])),
-        }
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required: missing Authorization Bearer header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     parts = authorization.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Authorization header format. Expected 'Bearer <token>'",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     token = parts[1]
     payload = rbac.decode_access_token(token)
     if not payload:
-        raise HTTPException(status_code=401, detail="Invalid or expired access token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired access token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     return payload
+
+
+def require_permission(required_permission: str):
+    """Dependency factory ensuring current user possesses the required permission."""
+    def permission_checker(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+        if not rbac.verify_permission(current_user, required_permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Forbidden: role '{current_user.get('role')}' lacks required permission '{required_permission}'",
+            )
+        return current_user
+    return permission_checker
+
+
+def require_any_permission(allowed_permissions: List[str]):
+    """Dependency factory ensuring current user possesses at least one of the allowed permissions."""
+    def permission_checker(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+        for perm in allowed_permissions:
+            if rbac.verify_permission(current_user, perm):
+                return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Forbidden: role '{current_user.get('role')}' lacks any of required permissions: {allowed_permissions}",
+        )
+    return permission_checker
 
 
 # ─── Authentication Endpoints ─────────────────────────────────────────────────
@@ -209,7 +240,7 @@ def switch_persona(req: models.DemoPersonaSwitchRequest):
 # ─── Device Intelligence & Safety Endpoints ───────────────────────────────────
 
 @app.get("/api/devices", response_model=List[models.DeviceDescriptor])
-def list_devices(current_user: Dict[str, Any] = Depends(get_current_user)):
+def list_devices(current_user: Dict[str, Any] = Depends(require_permission("devices:read"))):
     """Enumerate physical drives, partitions, bus interfaces, and safety lock states."""
     import drex_app
     drives = drex_app.discover_drives()
@@ -253,7 +284,7 @@ def list_devices(current_user: Dict[str, Any] = Depends(get_current_user)):
 
 
 @app.get("/api/devices/{device_id}/qualification", response_model=List[models.MethodQualificationItem])
-def get_device_method_qualification(device_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+def get_device_method_qualification(device_id: str, current_user: Dict[str, Any] = Depends(require_permission("devices:qualify"))):
     """Evaluate full 25-method qualification matrix against target device parameters."""
     target_snap = DeviceIntelligenceEngine.create_snapshot(device_id)
     matrix = Qualification25MethodEngine.evaluate_25_methods(target_snap)
@@ -261,13 +292,15 @@ def get_device_method_qualification(device_id: str, current_user: Dict[str, Any]
 
     for m_id in sorted(matrix.keys()):
         rec = matrix[m_id]
+        q_status = rec.qualification_status.value if hasattr(rec.qualification_status, "value") else str(rec.qualification_status)
+        explanation = "; ".join(rec.blocking_reasons or rec.limitations) if (rec.blocking_reasons or rec.limitations) else f"Backend: {rec.selected_backend}"
         results.append(
             models.MethodQualificationItem(
                 method_id=rec.method_id,
                 method_name=rec.canonical_name,
                 category=rec.category,
-                status=rec.status.value if hasattr(rec.status, "value") else str(rec.status),
-                explanation=rec.explanation,
+                status=q_status,
+                explanation=explanation,
             )
         )
 
@@ -277,7 +310,7 @@ def get_device_method_qualification(device_id: str, current_user: Dict[str, Any]
 # ─── Case Management Endpoints ────────────────────────────────────────────────
 
 @app.get("/api/cases", response_model=List[models.ForensicCaseRecord])
-def list_cases(current_user: Dict[str, Any] = Depends(get_current_user)):
+def list_cases(current_user: Dict[str, Any] = Depends(require_permission("cases:read"))):
     """Retrieve all recorded forensic cases."""
     cases = case_manager.list_cases()
     # Seed default case if empty
@@ -312,7 +345,7 @@ def list_cases(current_user: Dict[str, Any] = Depends(get_current_user)):
 
 
 @app.post("/api/cases", response_model=models.ForensicCaseRecord)
-def create_case(req: models.ForensicCaseCreate, current_user: Dict[str, Any] = Depends(get_current_user)):
+def create_case(req: models.ForensicCaseCreate, current_user: Dict[str, Any] = Depends(require_permission("cases:write"))):
     """Create a new tamper-evident forensic case record."""
     c = case_manager.create_case(
         case_number=req.case_number,
@@ -337,7 +370,7 @@ def create_case(req: models.ForensicCaseCreate, current_user: Dict[str, Any] = D
 
 
 @app.get("/api/cases/{case_id}/timeline", response_model=List[models.TimelineEventRecord])
-def get_case_timeline(case_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+def get_case_timeline(case_id: str, current_user: Dict[str, Any] = Depends(require_permission("timeline:read"))):
     """Retrieve chronologically ordered, hash-bound timeline events for a case."""
     events = case_manager.get_timeline(case_id)
     out = []
@@ -360,7 +393,7 @@ def get_case_timeline(case_id: str, current_user: Dict[str, Any] = Depends(get_c
 # ─── Evidence Vault Endpoints ─────────────────────────────────────────────────
 
 @app.get("/api/evidence", response_model=List[models.EvidenceItemRecord])
-def list_evidence(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
+def list_evidence(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(require_permission("evidence:read"))):
     """List isolated evidence artifacts in the Evidence Vault."""
     target_case_id = case_id
     if not target_case_id:
@@ -398,7 +431,7 @@ def list_evidence(case_id: Optional[str] = None, current_user: Dict[str, Any] = 
 def launch_recovery_scan(
     req: models.RecoveryScanRequest,
     background_tasks: BackgroundTasks,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(require_permission("recovery:scan")),
 ):
     """Launch non-blocking forensic recovery or raw carving scan."""
     job_id = f"REC-{uuid.uuid4().hex[:8].upper()}"
@@ -449,7 +482,7 @@ def launch_recovery_scan(
 
 
 @app.get("/api/recovery/candidates", response_model=List[models.RecoveryCandidateRecord])
-def get_recovery_candidates(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
+def get_recovery_candidates(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(require_any_permission(["recovery:read", "recovery:scan", "recovery:extract"]))):
     """Return candidates with explainable 5-factor confidence scoring."""
     # Deterministic representative candidates
     sample_candidates = [
@@ -502,7 +535,7 @@ def get_recovery_candidates(case_id: Optional[str] = None, current_user: Dict[st
 # ─── Sanitization & Erasure Endpoints ─────────────────────────────────────────
 
 @app.post("/api/sanitization/plan", response_model=models.SanitizationPlanResponse)
-def plan_sanitization(req: models.SanitizationPlanRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+def plan_sanitization(req: models.SanitizationPlanRequest, current_user: Dict[str, Any] = Depends(require_permission("sanitization:plan"))):
     """Generate compliant sanitization plan and verify safety clearances."""
     # Check dynamic system drive protection
     is_sys = DeviceIntelligenceEngine.is_system_drive(req.target_path)
@@ -525,7 +558,7 @@ def plan_sanitization(req: models.SanitizationPlanRequest, current_user: Dict[st
 
 
 @app.post("/api/sanitization/execute")
-def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: Dict[str, Any] = Depends(require_permission("sanitization:execute"))):
     """Execute sanitization plan with strict confirmation phrase verification."""
     # Enforce Windows boot/system drive safety tripwire
     if DeviceIntelligenceEngine.is_system_drive(req.target_path):
@@ -577,7 +610,7 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
 # ─── 64-Sector Storage Block Visualizer Telemetry ─────────────────────────────
 
 @app.get("/api/sanitization/sector-grid", response_model=List[models.SectorBlockState])
-def get_sector_block_grid():
+def get_sector_block_grid(current_user: Dict[str, Any] = Depends(require_any_permission(["sanitization:plan", "residue:analyze", "verification:entropy"]))):
     """Return 64-block storage block grid for real-time visualization."""
     blocks = []
     for i in range(64):
@@ -595,7 +628,7 @@ def get_sector_block_grid():
 # ─── Audit Trail & Verification Endpoints ─────────────────────────────────────
 
 @app.get("/api/audit/ledger", response_model=List[models.AuditEventRecord])
-def get_audit_ledger(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(get_current_user)):
+def get_audit_ledger(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(require_permission("audit:read"))):
     """Retrieve cryptographically linked SHA-256 audit ledger."""
     target_case_id = case_id
     if not target_case_id:
@@ -627,7 +660,7 @@ def get_audit_ledger(case_id: Optional[str] = None, current_user: Dict[str, Any]
 
 
 @app.post("/api/audit/verify")
-def verify_audit_integrity(case_id: Optional[str] = None):
+def verify_audit_integrity(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(require_permission("audit:verify"))):
     """Validate full SHA-256 Merkle / hash-chain integrity of the audit log."""
     target_case_id = case_id
     if not target_case_id:
@@ -651,7 +684,7 @@ def verify_audit_integrity(case_id: Optional[str] = None):
 
 
 @app.post("/api/verification/verify-package", response_model=models.IndependentVerifyResult)
-def verify_evidence_package(package_path: str = Query(...)):
+def verify_evidence_package(package_path: str = Query(...), current_user: Dict[str, Any] = Depends(require_permission("verification:verify"))):
     """Run standalone drex_verify.py verifier against an evidence package."""
     p = pathlib.Path(package_path)
     if not p.exists():
@@ -714,7 +747,7 @@ def get_method_registry():
 # ─── 1-Click Deterministic Judge Demo Flow ───────────────────────────────────
 
 @app.post("/api/demo/flow")
-async def execute_judge_demo_flow(current_user: Dict[str, Any] = Depends(get_current_user)):
+async def execute_judge_demo_flow(current_user: Dict[str, Any] = Depends(require_permission("demo:run"))):
     """Execute end-to-end safe, non-destructive Judge Demonstration in < 60s."""
     demo_steps = [
         {"step": 1, "title": "Initialize Demo Case", "detail": "Creating DREX-DEMO-2026 tamper-evident case container."},
@@ -754,26 +787,185 @@ async def execute_judge_demo_flow(current_user: Dict[str, Any] = Depends(get_cur
 # ─── WebSocket Endpoint ───────────────────────────────────────────────────────
 
 @app.websocket("/ws/jobs")
-async def websocket_jobs_endpoint(websocket: WebSocket):
+@app.websocket("/ws/jobs/{client_id}")
+async def websocket_jobs_endpoint(
+    websocket: WebSocket,
+    client_id: Optional[str] = None,
+    token: Optional[str] = Query(None),
+):
     """Real-time bidirectional WebSocket connection for live telemetry and job streaming."""
+    authenticated_user = None
+    if token:
+        authenticated_user = rbac.decode_access_token(token)
+        if not authenticated_user:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired access token")
+            return
+
     await ws_manager.connect(websocket)
     try:
+        # Initial connection acknowledgment
+        await websocket.send_json({
+            "type": "CONNECTED",
+            "client_id": client_id or "anonymous",
+            "authenticated": authenticated_user is not None,
+            "role": authenticated_user.get("role") if authenticated_user else "UNAUTHENTICATED",
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        })
+
         while True:
-            data = await websocket.receive_text()
-            # Handle incoming ping / command
-            await websocket.send_json({"type": "PONG", "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+            text_data = await websocket.receive_text()
+            try:
+                msg = json.loads(text_data)
+            except Exception:
+                await websocket.send_json({
+                    "type": "ERROR",
+                    "error": "MALFORMED_JSON",
+                    "detail": "Received non-JSON payload or syntax error",
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+                continue
+
+            msg_type = str(msg.get("type", "")).upper()
+
+            if msg_type == "PING":
+                await websocket.send_json({"type": "PONG", "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+            elif msg_type == "AUTH":
+                req_token = msg.get("token", "")
+                auth_payload = rbac.decode_access_token(req_token)
+                if auth_payload:
+                    authenticated_user = auth_payload
+                    await websocket.send_json({
+                        "type": "AUTH_SUCCESS",
+                        "role": auth_payload.get("role"),
+                        "display_name": auth_payload.get("display_name"),
+                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    })
+                else:
+                    await websocket.send_json({
+                        "type": "AUTH_FAILURE",
+                        "error": "INVALID_TOKEN",
+                        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    })
+            elif msg_type == "JOB_STARTED":
+                await websocket.send_json({
+                    "type": "JOB_STARTED",
+                    "job_id": msg.get("job_id", f"JOB-{uuid.uuid4().hex[:8]}"),
+                    "target": msg.get("target", "SYNTHETIC_TARGET"),
+                    "engine": msg.get("engine", "ForensicEngine"),
+                    "status": "RUNNING",
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+            elif msg_type == "JOB_PROGRESS":
+                await websocket.send_json({
+                    "type": "JOB_PROGRESS",
+                    "job_id": msg.get("job_id", "JOB-001"),
+                    "progress_pct": min(100.0, float(msg.get("progress_pct", 0.0))),
+                    "bytes_processed": msg.get("bytes_processed", 0),
+                    "throughput_mb_s": msg.get("throughput_mb_s", 125.4),
+                    "eta_seconds": msg.get("eta_seconds", 5),
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+            elif msg_type == "CANDIDATE_DISCOVERED":
+                await websocket.send_json({
+                    "type": "CANDIDATE_DISCOVERED",
+                    "job_id": msg.get("job_id", "JOB-001"),
+                    "candidate_id": msg.get("candidate_id", f"CAND-{uuid.uuid4().hex[:6]}"),
+                    "file_type": msg.get("file_type", "UNKNOWN"),
+                    "confidence_score": msg.get("confidence_score", 0.95),
+                    "offset": msg.get("offset", 0),
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+            elif msg_type == "SECTOR_UPDATE":
+                await websocket.send_json({
+                    "type": "SECTOR_UPDATE",
+                    "block_index": msg.get("block_index", 0),
+                    "state": msg.get("state", "ZEROED"),
+                    "entropy": msg.get("entropy", 0.0),
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+            elif msg_type == "LOG_ENTRY":
+                await websocket.send_json({
+                    "type": "LOG_ENTRY",
+                    "level": msg.get("level", "INFO"),
+                    "message": msg.get("message", "Telemetry heartbeat"),
+                    "source": msg.get("source", "DREX_WORKSTATION"),
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+            elif msg_type == "JOB_COMPLETED":
+                await websocket.send_json({
+                    "type": "JOB_COMPLETED",
+                    "job_id": msg.get("job_id", "JOB-001"),
+                    "verdict": msg.get("verdict", "PASS — EXECUTION VERIFIED"),
+                    "elapsed_seconds": msg.get("elapsed_seconds", 1.2),
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+            elif msg_type == "JOB_FAILED":
+                await websocket.send_json({
+                    "type": "JOB_FAILED",
+                    "job_id": msg.get("job_id", "JOB-001"),
+                    "error": msg.get("error", "Simulated job error"),
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+            else:
+                await websocket.send_json({
+                    "type": "UNKNOWN_EVENT",
+                    "received_type": msg.get("type"),
+                    "status": "UNHANDLED",
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                })
+
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
 
 
-# ─── Static SPA File Serving ──────────────────────────────────────────────────
+# ─── Static Files & SPA Fallback Serving ──────────────────────────────────────
 
 if WEBUI_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(WEBUI_DIR)), name="static")
 
+@app.get("/manifest.json")
+def get_manifest():
+    p = WEBUI_DIR / "manifest.json"
+    if p.exists():
+        return FileResponse(str(p), media_type="application/manifest+json")
+    raise HTTPException(status_code=404, detail="manifest.json not found")
+
+@app.get("/sw.js")
+def get_service_worker():
+    p = WEBUI_DIR / "sw.js"
+    if p.exists():
+        return FileResponse(str(p), media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="sw.js not found")
+
+@app.get("/icon-{size}.png")
+def get_icon(size: str):
+    p = WEBUI_DIR / f"icon-{size}.png"
+    if p.exists():
+        return FileResponse(str(p), media_type="image/png")
+    raise HTTPException(status_code=404, detail="Icon not found")
+
+@app.get("/styles.css")
+def get_styles():
+    p = WEBUI_DIR / "styles.css"
+    if p.exists():
+        return FileResponse(str(p), media_type="text/css")
+    raise HTTPException(status_code=404, detail="styles.css not found")
+
+@app.get("/app.js")
+def get_app_js():
+    p = WEBUI_DIR / "app.js"
+    if p.exists():
+        return FileResponse(str(p), media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="app.js not found")
+
 @app.get("/", response_class=HTMLResponse)
-def serve_index():
-    """Serve the unified DREX-V2 multi-surface application shell."""
+@app.get("/{full_path:path}", response_class=HTMLResponse)
+def serve_index_or_spa(full_path: str = ""):
+    """Serve the unified DREX-V2 multi-surface application shell and SPA fallback."""
+    if full_path:
+        target = WEBUI_DIR / full_path
+        if target.is_file():
+            return FileResponse(str(target))
     index_file = WEBUI_DIR / "index.html"
     if index_file.exists():
         return FileResponse(str(index_file))

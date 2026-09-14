@@ -1,0 +1,25 @@
+{
+  "name": "DREX-V2 Forensic Workstation & Assurance Platform",
+  "short_name": "DREX-V2",
+  "description": "Integrated Secure Storage Erasure & Advanced Digital Forensic Recovery Platform",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0B1F3A",
+  "theme_color": "#0B1F3A",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

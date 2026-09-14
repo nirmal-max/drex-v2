@@ -32,8 +32,11 @@ from hardware_storage import DeviceIntelligenceEngine, DeviceIdentitySnapshot
 
 @pytest.fixture
 def client():
-    """FastAPI test client instance."""
-    return TestClient(drex_server.app)
+    """FastAPI test client instance with default JUDGE_DEMO authorization."""
+    c = TestClient(drex_server.app)
+    token = rbac.create_access_token(models.UserRole.JUDGE_DEMO)
+    c.headers["Authorization"] = f"Bearer {token}"
+    return c
 
 
 # ─── 1. System-Drive Detection Tests (Correction 2) ──────────────────────────

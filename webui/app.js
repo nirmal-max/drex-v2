@@ -556,8 +556,37 @@ async function runDemoPackageVerification() {
 }
 
 function closeModal() {
-  document.getElementById('modalOverlay').style.display = 'none';
+  const overlay = document.getElementById('modalOverlay');
+  if (overlay) overlay.style.display = 'none';
 }
+
+async function triggerRecoveryScan() {
+  try {
+    const target = (STATE.devices && STATE.devices.length > 0) ? STATE.devices[0].device_path : '\\\\.\\\\PhysicalDrive99';
+    const res = await api('/api/recovery/scan', {
+      method: 'POST',
+      body: JSON.stringify({
+        source_path: target,
+        destination_dir: 'vault/extracted',
+        engine: 'TSK',
+      }),
+    });
+    alert(`Safe Read-Only Recovery Scan Dispatched!\nJob ID: ${res.job_id}\nStatus: ${res.status}\nEngine: ${res.engine}`);
+  } catch (ex) {
+    alert(`Recovery Scan Notice: ${ex.message}`);
+  }
+}
+
+// Attach global event functions for inline HTML onclick attributes
+window.closeModal = closeModal;
+window.triggerRecoveryScan = triggerRecoveryScan;
+window.runJudgeProofLoop = runJudgeProofLoop;
+window.openDestructiveConfirm = openDestructiveConfirm;
+window.submitSanitization = submitSanitization;
+window.verifyAuditChain = verifyAuditChain;
+window.runDemoPackageVerification = runDemoPackageVerification;
+window.handlePersonaChange = handlePersonaChange;
+window.navigateTo = navigateTo;
 
 // ─── Persona Switcher ─────────────────────────────────────────────────────────
 
@@ -582,7 +611,7 @@ async function loadInitialData() {
     // 1. Initial Persona Switch
     const authRes = await api('/api/auth/switch-persona', {
       method: 'POST',
-      body: JSON.stringify({ target_role: 'JUDGE_DEMO' }),
+      body: JSON.stringify({ target_role: STATE.currentRole || 'JUDGE_DEMO' }),
     }).catch(() => null);
 
     if (authRes) STATE.token = authRes.access_token;
@@ -639,6 +668,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // Topbar Buttons
   document.getElementById('refreshBtn').addEventListener('click', () => loadInitialData());
   document.getElementById('runJudgeProofBtn').addEventListener('click', () => runJudgeProofLoop());
+
+  // Modal dismiss helpers
+  const overlay = document.getElementById('modalOverlay');
+  if (overlay) {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeModal();
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeModal();
+  });
 
   // Bootstrap
   loadInitialData();
