@@ -1,8 +1,8 @@
 # DREX-V2 Proven-Code Provenance Register
 
-**Version:** DREX-V2 Phase 4 Hardened  
+**Version:** DREX-V2 Phase 5 Hardened  
 **Standard:** Strict Open-Source Provenance & Forensic Traceability  
-**Total Registered Components:** 12 Components (`PROV-001` through `PROV-011`, `PROV-HW-001`)  
+**Total Registered Components:** 14 Components (`PROV-001` through `PROV-011`, `PROV-HW-001`, `PROV-REC-001`, `PROV-REC-002`)  
 **Overall Licensing Status:** **ALL SOURCES COMPATIBLE / NON-BLOCKING**
 
 ---
@@ -244,5 +244,36 @@
   - Added truthful execution & qualification states (`SIMULATION_QUALIFIED`, `PHYSICAL_QUALIFIED`, `simulated_hardware_response`, `hardware_qualification: NOT_ESTABLISHED` until physical test harness is executed on dedicated test drive).
 - **Dependencies:** `ctypes` (standard library on Windows).
 - **Validation Evidence:** `tests/hardware_qualification/test_hardware_qualification_harness.py`.
+
+---
+
+### PROV-REC-001: GNU ddrescue External Acquisition & Mapfile Architecture Reference
+- **Source Project:** GNU ddrescue
+- **Repository URL:** `https://savannah.gnu.org/git/?group=ddrescue`
+- **Source Version:** GNU ddrescue v1.28
+- **Original License:** GNU General Public License v2 or later (GPL v2+)
+- **License Status:** COMPATIBLE / NON-BLOCKING (External optional CLI process invocation; zero bundled or copied GPL code)
+- **DREX Destination Files:** `damaged_media.py`, `backend_adapters.py`, `recovery_adapter.py`
+- **DREX Destination Symbols:** `DdrescueMapfile`, `MapfileBlock`, `MapBlockStatus`, `build_ddrescue_command`, `parse_ddrescue_output`, `DirectDamagedMediaImager`
+- **Adaptation Type:** REFERENCE_ONLY & CLEAN_ROOM_SPECIFICATION
+- **Reason for Reuse:** GNU ddrescue is the gold standard for damaged-media acquisition, multi-pass copying/trimming/scraping, and `.map` mapfile tracking.
+- **DREX Clean-Room Implementation:** Clean-room specification implementation of the mapfile format and streaming fallback imager with zero copied GPL code.
+- **Dependencies:** Optional external CLI binary (`ddrescue` / `ddrescue.exe`).
+- **Validation Evidence:** `tests/test_phase5_damaged_media.py`.
+
+---
+
+### PROV-REC-002: Linux mdadm RAID Layout Specification Reference
+- **Source Project:** mdadm (Linux Software RAID)
+- **Repository URL:** `https://git.kernel.org/pub/scm/utils/mdadm/mdadm.git`
+- **Source Version:** mdadm v4.3
+- **Original License:** GNU General Public License v2 (GPL v2)
+- **License Status:** COMPATIBLE / NON-BLOCKING (Algorithmic / Layout behavioral reference only; zero copied GPL code)
+- **DREX Destination File:** `recovery_adapter.py`
+- **DREX Destination Symbol:** `VirtualRaidReconstructor`
+- **Adaptation Type:** REFERENCE_ONLY (Clean-room Python XOR math and stripe sequencing)
+- **Reason for Reuse:** Standard parity rotation layouts (left-symmetric, right-symmetric, dedicated-parity) and single-disk XOR recovery algorithms.
+- **Dependencies:** None (Pure Python standard library).
+- **Validation Evidence:** `tests/test_phase5_raid_reconstruction.py`.
 
 

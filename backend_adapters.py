@@ -649,3 +649,126 @@ class CentralProcessRunner:
         )
 
 
+# ─── GNU ddrescue Adapter (External Tool Invocation Only) ───────────────────
+# Upstream: ddrescue [options] infile outfile [mapfile]
+# Reference: GNU ddrescue manual / public CLI interface (GPL external tool)
+
+def build_ddrescue_command(
+    ddrescue_exe: Path,
+    source: str | Path,
+    destination: str | Path,
+    mapfile: str | Path,
+    *,
+    sector_size: int | None = None,
+    retry_passes: int | None = None,
+    direct_access: bool = False,
+    direct_io: bool = False,
+    no_trim: bool = False,
+    no_scrape: bool = False,
+    reverse: bool = False,
+    verbose: bool = True,
+    force: bool = False,
+) -> list[str]:
+    """Build a validated GNU ddrescue command line array using verified CLI flags."""
+    cmd = [str(ddrescue_exe)]
+    if verbose:
+        cmd.append("-v")
+    if force:
+        cmd.append("-f")
+    if no_scrape:
+        cmd.append("-n")
+    if no_trim:
+        cmd.append("-N")
+    if retry_passes is not None:
+        cmd.extend(["-r", str(retry_passes)])
+    if direct_access or direct_io:
+        cmd.append("-d")
+    if sector_size is not None and sector_size != 512:
+        cmd.extend(["-b", str(sector_size)])
+    if reverse:
+        cmd.append("-R")
+    cmd.extend([str(source), str(destination), str(mapfile)])
+    return cmd
+
+
+def parse_ddrescue_mapfile(content_or_path: str | Path) -> dict[str, Any]:
+    """Parse ddrescue mapfile content or file path and return standard summary statistics dict."""
+    if isinstance(content_or_path, Path) or (isinstance(content_or_path, str) and "\n" not in content_or_path and not content_or_path.startswith("0x") and not content_or_path.startswith("#")):
+        p = Path(content_or_path)
+        if not p.is_file():
+            return {
+                "rescued_bytes": 0,
+                "bad_bytes": 0,
+                "non_tried_bytes": 0,
+                "total_bytes": 0,
+                "regions": [],
+            }
+    from damaged_media import DdrescueMapfile
+    try:
+        mf = DdrescueMapfile.parse_mapfile(content_or_path)
+        stats = mf.summary_stats()
+        stats["regions"] = [{"pos": b.pos, "size": b.size, "status": b.status.value} for b in mf.blocks]
+        return stats
+    except Exception:
+        return {
+            "rescued_bytes": 0,
+            "bad_bytes": 0,
+            "non_tried_bytes": 0,
+            "total_bytes": 0,
+            "regions": [],
+        }
+
+
+def parse_ddrescue_output(stdout: str) -> dict[str, Any]:
+    """Parse GNU ddrescue progress and summary text output."""
+    res: dict[str, Any] = {
+        "rescued_str": "",
+        "rescued_bytes": 0,
+        "errsize_str": "",
+        "errsize_bytes": 0,
+        "bad_areas": 0,
+        "current_pass": 1,
+        "pct_rescued": 0.0,
+    }
+    for line in stdout.splitlines():
+        line = line.strip()
+        # Pattern: (not pct) rescued: 1234 B
+        rescued_match = re.search(r"(?<!pct\s)rescued:\s*([\d\.]+\s*[kMGTP]?B|\d+)", line, re.IGNORECASE)
+        if rescued_match:
+            res["rescued_str"] = rescued_match.group(1).strip()
+        errsize_match = re.search(r"errsize:\s*([\d\.]+\s*[kMGTP]?B|\d+)", line, re.IGNORECASE)
+        if errsize_match:
+            res["errsize_str"] = errsize_match.group(1).strip()
+        bad_match = re.search(r"bad areas:\s*(\d+)", line, re.IGNORECASE)
+        if bad_match:
+            res["bad_areas"] = int(bad_match.group(1))
+        pct_match = re.search(r"pct rescued:\s*([\d\.]+)%", line, re.IGNORECASE)
+        if pct_match:
+            res["pct_rescued"] = float(pct_match.group(1))
+        pass_match = re.search(r"current_pass:\s*(\d+)|pass\s*(\d+)", line, re.IGNORECASE)
+        if pass_match:
+            val = pass_match.group(1) or pass_match.group(2)
+            res["current_pass"] = int(val)
+
+    return res
+
+
+@dataclass
+class DdrescueAcquisitionResult:
+    """Result from a controlled external GNU ddrescue execution."""
+    success: bool
+    source_path: str
+    output_image_path: str
+    mapfile_path: str
+    rescued_bytes: int
+    bad_bytes: int
+    image_sha256: str
+    mapfile_sha256: str
+    duration_seconds: float
+    command: list[str]
+    stdout: str
+    stderr: str
+    error_message: str = ""
+    is_simulation: bool = False
+
+

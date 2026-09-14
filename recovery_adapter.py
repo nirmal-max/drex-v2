@@ -882,9 +882,11 @@ class FragmentReconstructor:
 class VirtualRaidReconstructor:
     """Virtual RAID array reconstruction engine.
     
-    Reconstructs RAID 0, 1, 5, 6, 10 volume images from raw member drives or disk images.
+    Reconstructs RAID 0, 1, 5, 10 volume images from raw member drives or disk images.
     Implements XOR parity recovery for degraded RAID 5 arrays.
     """
+
+    SUPPORTED_RAID5_LAYOUTS = {"left-symmetric", "dedicated-parity", "raid4"}
 
     @staticmethod
     def reconstruct_raid0(members: list[bytes], chunk_size: int = 65536) -> bytes:
@@ -900,6 +902,25 @@ class VirtualRaidReconstructor:
         return bytes(out)
 
     @staticmethod
+    def reconstruct_raid0_stream(member_paths: list[Path | str], output_path: Path | str, chunk_size: int = 65536) -> int:
+        """Streaming RAID0 reconstruction with bounded memory buffer."""
+        handles = [open(p, "rb") for p in member_paths]
+        total_written = 0
+        try:
+            with open(output_path, "wb") as out_f:
+                while True:
+                    chunks = [h.read(chunk_size) for h in handles]
+                    if any(len(c) < chunk_size for c in chunks):
+                        break
+                    for c in chunks:
+                        out_f.write(c)
+                        total_written += len(c)
+        finally:
+            for h in handles:
+                h.close()
+        return total_written
+
+    @staticmethod
     def reconstruct_raid1(members: list[bytes]) -> bytes:
         """Mirrored RAID1."""
         if not members:
@@ -907,11 +928,19 @@ class VirtualRaidReconstructor:
         return members[0]
 
     @staticmethod
-    def reconstruct_raid5(members: list[bytes], chunk_size: int = 65536, missing_idx: int | None = None, layout: str = "left-symmetric") -> bytes:
+    def reconstruct_raid5(
+        members: list[bytes],
+        chunk_size: int = 65536,
+        missing_idx: int | None = None,
+        layout: str = "left-symmetric"
+    ) -> bytes:
         """RAID5 with rotating parity and single-disk failure XOR reconstruction."""
         num_disks = len(members)
         if num_disks < 3:
             raise ValueError("RAID5 requires at least 3 members.")
+        if layout not in VirtualRaidReconstructor.SUPPORTED_RAID5_LAYOUTS:
+            raise ValueError(f"Unsupported RAID5 layout: '{layout}'. Supported layouts: {sorted(VirtualRaidReconstructor.SUPPORTED_RAID5_LAYOUTS)}")
+            
         min_len = min(len(m) for m in members)
         num_stripes = min_len // chunk_size
         out = bytearray()
@@ -920,7 +949,7 @@ class VirtualRaidReconstructor:
             # Calculate parity disk index for this stripe
             if layout == "left-symmetric":
                 p_disk = (num_disks - 1 - (s % num_disks))
-            elif layout == "dedicated-parity" or layout == "raid4":
+            elif layout in ("dedicated-parity", "raid4"):
                 p_disk = num_disks - 1
             else:
                 p_disk = (s % num_disks)
@@ -947,6 +976,71 @@ class VirtualRaidReconstructor:
         return bytes(out)
 
     @staticmethod
+    def reconstruct_raid5_stream(
+        member_paths: list[Path | str],
+        output_path: Path | str,
+        chunk_size: int = 65536,
+        missing_idx: int | None = None,
+        layout: str = "left-symmetric"
+    ) -> int:
+        """Streaming RAID5 reconstruction with bounded memory buffer."""
+        num_disks = len(member_paths)
+        if num_disks < 3:
+            raise ValueError("RAID5 requires at least 3 members.")
+        if layout not in VirtualRaidReconstructor.SUPPORTED_RAID5_LAYOUTS:
+            raise ValueError(f"Unsupported RAID5 layout: '{layout}'")
+
+        handles = [open(p, "rb") if i != missing_idx else None for i, p in enumerate(member_paths)]
+        total_written = 0
+        stripe_idx = 0
+        try:
+            with open(output_path, "wb") as out_f:
+                while True:
+                    stripe_chunks: list[bytes] = []
+                    eof_reached = False
+                    for d in range(num_disks):
+                        if d == missing_idx:
+                            stripe_chunks.append(b"")
+                        else:
+                            assert handles[d] is not None
+                            c = handles[d].read(chunk_size)
+                            if len(c) < chunk_size:
+                                eof_reached = True
+                                break
+                            stripe_chunks.append(c)
+                    if eof_reached:
+                        break
+
+                    # XOR reconstruct missing disk
+                    if missing_idx is not None:
+                        xor_chunk = bytearray(chunk_size)
+                        for d in range(num_disks):
+                            if d != missing_idx:
+                                chunk_data = stripe_chunks[d]
+                                for b in range(chunk_size):
+                                    xor_chunk[b] ^= chunk_data[b]
+                        stripe_chunks[missing_idx] = bytes(xor_chunk)
+
+                    # Determine parity disk
+                    if layout == "left-symmetric":
+                        p_disk = (num_disks - 1 - (stripe_idx % num_disks))
+                    elif layout in ("dedicated-parity", "raid4"):
+                        p_disk = num_disks - 1
+                    else:
+                        p_disk = (stripe_idx % num_disks)
+
+                    for d in range(num_disks):
+                        if d != p_disk:
+                            out_f.write(stripe_chunks[d])
+                            total_written += len(stripe_chunks[d])
+                    stripe_idx += 1
+        finally:
+            for h in handles:
+                if h is not None:
+                    h.close()
+        return total_written
+
+    @staticmethod
     def reconstruct_raid10(members: list[bytes], chunk_size: int = 65536) -> bytes:
         """RAID 10: Striped array of mirror pairs."""
         if len(members) < 4 or len(members) % 2 != 0:
@@ -971,72 +1065,94 @@ class DirectDamagedMediaImager:
         sector_size: int = 512,
         bad_sector_ranges: list[tuple[int, int]] | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        chunk_size: int = 65536,
     ) -> dict:
         """Image a source media stream, recording bad sectors to mapfile."""
         output_image_path.parent.mkdir(parents=True, exist_ok=True)
         mapfile_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if isinstance(source_data, Path):
-            raw = source_data.read_bytes()
-        else:
-            raw = source_data
+        from damaged_media import DdrescueMapfile, MapBlockStatus, MapfileBlock
 
-        total_bytes = len(raw)
+        if isinstance(source_data, Path):
+            total_bytes = source_data.stat().st_size
+            src_file = open(source_data, "rb")
+        else:
+            total_bytes = len(source_data)
+            import io
+            src_file = io.BytesIO(source_data)
+
         bad_ranges = bad_sector_ranges or []
         bad_byte_set = set()
         for start_sec, count_sec in bad_ranges:
             for b in range(start_sec * sector_size, (start_sec + count_sec) * sector_size):
                 bad_byte_set.add(b)
 
-        out = bytearray(total_bytes)
         rescued_bytes = 0
         bad_bytes = 0
-
-        # Create map entries
-        map_entries = []
+        map_blocks: list[MapfileBlock] = []
         cur_offset = 0
 
-        while cur_offset < total_bytes:
-            if cancel_check and cancel_check():
-                break
-            chunk_len = min(65536, total_bytes - cur_offset)
-            is_bad = any((cur_offset + i) in bad_byte_set for i in range(chunk_len))
+        try:
+            with open(output_image_path, "wb") as out_f:
+                while cur_offset < total_bytes:
+                    if cancel_check and cancel_check():
+                        break
+                    block_len = min(chunk_size, total_bytes - cur_offset)
+                    is_bad = any((cur_offset + i) in bad_byte_set for i in range(block_len))
 
-            if not is_bad:
-                out[cur_offset:cur_offset + chunk_len] = raw[cur_offset:cur_offset + chunk_len]
-                rescued_bytes += chunk_len
-                map_entries.append(f"0x{cur_offset:08X}  0x{chunk_len:08X}  +")
-                cur_offset += chunk_len
-            else:
-                # Fall back to sector-by-sector
-                for s in range(0, chunk_len, sector_size):
-                    sec_offset = cur_offset + s
-                    sec_len = min(sector_size, total_bytes - sec_offset)
-                    sec_is_bad = any((sec_offset + i) in bad_byte_set for i in range(sec_len))
-                    if not sec_is_bad:
-                        out[sec_offset:sec_offset + sec_len] = raw[sec_offset:sec_offset + sec_len]
-                        rescued_bytes += sec_len
-                        map_entries.append(f"0x{sec_offset:08X}  0x{sec_len:08X}  +")
+                    if not is_bad:
+                        src_file.seek(cur_offset)
+                        chunk = src_file.read(block_len)
+                        out_f.write(chunk)
+                        rescued_bytes += len(chunk)
+                        # Append or coalesce map block
+                        if map_blocks and map_blocks[-1].status == MapBlockStatus.FINISHED and map_blocks[-1].end == cur_offset:
+                            map_blocks[-1].size += len(chunk)
+                        else:
+                            map_blocks.append(MapfileBlock(pos=cur_offset, size=len(chunk), status=MapBlockStatus.FINISHED))
+                        cur_offset += block_len
                     else:
-                        out[sec_offset:sec_offset + sec_len] = b"\x00" * sec_len
-                        bad_bytes += sec_len
-                        map_entries.append(f"0x{sec_offset:08X}  0x{sec_len:08X}  -")
-                cur_offset += chunk_len
+                        # Fall back to sector-by-sector
+                        for s in range(0, block_len, sector_size):
+                            sec_offset = cur_offset + s
+                            sec_len = min(sector_size, total_bytes - sec_offset)
+                            sec_is_bad = any((sec_offset + i) in bad_byte_set for i in range(sec_len))
+                            if not sec_is_bad:
+                                src_file.seek(sec_offset)
+                                sec_data = src_file.read(sec_len)
+                                out_f.write(sec_data)
+                                rescued_bytes += len(sec_data)
+                                if map_blocks and map_blocks[-1].status == MapBlockStatus.FINISHED and map_blocks[-1].end == sec_offset:
+                                    map_blocks[-1].size += len(sec_data)
+                                else:
+                                    map_blocks.append(MapfileBlock(pos=sec_offset, size=len(sec_data), status=MapBlockStatus.FINISHED))
+                            else:
+                                out_f.write(b"\x00" * sec_len)
+                                bad_bytes += sec_len
+                                if map_blocks and map_blocks[-1].status == MapBlockStatus.BAD_SECTOR and map_blocks[-1].end == sec_offset:
+                                    map_blocks[-1].size += len(sec_len)
+                                else:
+                                    map_blocks.append(MapfileBlock(pos=sec_offset, size=sec_len, status=MapBlockStatus.BAD_SECTOR))
+                        cur_offset += block_len
+        finally:
+            src_file.close()
 
-        output_image_path.write_bytes(bytes(out))
-
-        # Write GNU ddrescue compatible mapfile
-        mapfile_content = (
-            "# Mapfile generated by DREXX DirectDamagedMediaImager\n"
-            "# Current_status +\n"
-            "# pos_current   status\n"
-            f"0x{cur_offset:08X}     +\n"
-            "# current_pass   current_status\n"
-            "1               +\n"
-            "#  pos        size        status\n"
-            + "\n".join(map_entries) + "\n"
+        # Write clean-room validated GNU ddrescue mapfile
+        mf = DdrescueMapfile(
+            current_pos=cur_offset,
+            current_status=MapBlockStatus.FINISHED,
+            current_pass=1,
+            blocks=map_blocks,
         )
-        mapfile_path.write_text(mapfile_content, encoding="utf-8")
+        mf.write_to_file(mapfile_path)
+
+        # Compute SHA-256 of image
+        import hashlib
+        with open(output_image_path, "rb") as f:
+            h = hashlib.sha256()
+            while chunk := f.read(65536):
+                h.update(chunk)
+            img_sha256 = h.hexdigest()
 
         return {
             "total_bytes": total_bytes,
@@ -1046,6 +1162,8 @@ class DirectDamagedMediaImager:
             "output_image": str(output_image_path),
             "mapfile": str(mapfile_path),
             "resumable": True,
+            "image_sha256": img_sha256,
+            "mapfile_sha256": mf.compute_sha256(),
         }
 
 

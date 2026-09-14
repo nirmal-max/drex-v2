@@ -23,7 +23,7 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO, Dict, Generator, List, Optional, Set, Tuple
 
-from validators.base import CandidateState, EvidenceScores, MemberStatus
+from validators.base import AuditableEvidenceScore, CandidateState, EvidenceScores, MemberStatus, RecoveryOutcome
 
 
 # ─── 1. Entropy & Seam Scoring ───────────────────────────────────────────────
@@ -92,6 +92,8 @@ class ReassemblyCandidate:
     assembled_bytes: bytes = field(repr=False)
     seam_scores: List[float] = field(default_factory=list)
     state: CandidateState = CandidateState.CANDIDATE
+    outcome: RecoveryOutcome = RecoveryOutcome.CANDIDATE_ONLY
+    evidence_score: Optional[AuditableEvidenceScore] = None
     limitations: List[str] = field(default_factory=list)
     sha256: str = ""
 
@@ -200,7 +202,36 @@ class FragmentReassembler:
             )
             confidence = round(min(1.0, max(0.0, confidence)), 4)
 
-            state = CandidateState.STRUCTURALLY_VALID if (has_valid_header and has_valid_footer) else CandidateState.CANDIDATE
+            # Determine lifecycle state and outcome
+            if has_valid_header and has_valid_footer:
+                state = CandidateState.STRUCTURALLY_VALID
+                outcome = RecoveryOutcome.RECOVERED
+            elif has_valid_header and len(assembled) > 1:
+                state = CandidateState.CANDIDATE
+                outcome = RecoveryOutcome.RECOVERED_WITH_GAP if remaining else RecoveryOutcome.PARTIAL_RECOVERY
+            else:
+                state = CandidateState.CANDIDATE
+                outcome = RecoveryOutcome.CANDIDATE_ONLY
+
+            # Build auditable evidence score with raw verification facts
+            score_obj = AuditableEvidenceScore(
+                confidence_score=round(confidence * 100.0, 2),
+                scoring_breakdown={
+                    "header_signature": 30.0 if has_valid_header else 0.0,
+                    "footer_signature": 30.0 if has_valid_footer else 0.0,
+                    "seam_continuity": round(avg_seam * 40.0, 2),
+                },
+                raw_evidence_facts={
+                    "file_type": file_type,
+                    "chunk_count": len(assembled),
+                    "chunk_ids": [c.chunk_id for c in assembled],
+                    "byte_length": len(current_bytes),
+                    "has_valid_header": has_valid_header,
+                    "has_valid_footer": has_valid_footer,
+                    "avg_seam_score": round(avg_seam, 4),
+                    "seam_scores": [round(s, 4) for s in seam_scores],
+                },
+            )
 
             candidates.append(
                 ReassemblyCandidate(
@@ -212,6 +243,8 @@ class FragmentReassembler:
                     assembled_bytes=bytes(current_bytes),
                     seam_scores=[round(s, 4) for s in seam_scores],
                     state=state,
+                    outcome=outcome,
+                    evidence_score=score_obj,
                 )
             )
 
