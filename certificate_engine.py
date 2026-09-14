@@ -2,7 +2,7 @@
 DREX-V2 Forensic Certificate & Evidence Verification Engine
 ============================================================
 
-Implements NIST SP 800-88 Rev. 1 Appendix C Aligned & ISO/IEC 27037 Referenced
+Implements NIST SP 800-88 Rev. 2 Aligned & ISO/IEC 27037 Referenced
 Tamper-Evident Forensic Certification.
 
 Capabilities:
@@ -46,9 +46,10 @@ class CertificateTargetInfo:
 class CertificateMethodInfo:
     method_id: int
     canonical_name: str
-    standard_reference: str  # "NIST SP 800-88 Rev. 1 Clear", "DoD 5220.22-M", etc.
-    pass_count: int
-    pattern_description: str
+    standard_reference: str = "NIST SP 800-88 Rev. 2 aligned"  # "NIST SP 800-88 Rev. 2 aligned", "NIST SP 800-88 Rev. 1 aligned", etc.
+    pass_count: int = 1
+    pattern_description: str = "Single-pass zero overwrite"
+    nist_profile: Optional[str] = "REV_2"  # "REV_1" (Legacy/Historical) or "REV_2" (Current)
 
 
 @dataclass
@@ -99,8 +100,13 @@ class PurePythonPDFWriter:
     Renders professional, tamper-evident forensic certificates without external dependencies.
     """
 
-    def __init__(self, title: str = "DREX-V2 Forensic Certificate"):
+    def __init__(
+        self,
+        title: str = "DREX-V2 Forensic Certificate",
+        standard_banner: str = "NIST SP 800-88 Rev. 2 Aligned & ISO/IEC 27037 Referenced Evidence Record",
+    ):
         self.title = title
+        self.standard_banner = standard_banner
         self.objects: List[bytes] = []
         self.page_contents: List[str] = []
 
@@ -135,10 +141,11 @@ class PurePythonPDFWriter:
             "(DREX-V2 FORENSIC SANITIZATION CERTIFICATE) Tj",
             "/F2 9 Tf",
             "0 -15 Td",
-            "(NIST SP 800-88 Rev. 1 Aligned & ISO/IEC 27037 Referenced Evidence Record) Tj",
+            f"({self.standard_banner}) Tj",
             "0 -25 Td",
             "/F1 10 Tf",
         ]
+
 
         y_offset = -14
         for line in self.page_contents:
@@ -231,7 +238,7 @@ class ForensicCertificateEngine:
         # Compute tamper-evident hash binding all certificate fields
         data_to_hash = (
             f"{cert_id}|{case_id}|{examiner_name}|{target_info.target_name}|"
-            f"{method_info.method_id}|{verification_info.post_wipe_sha256}|{prior_audit_hash}"
+            f"{method_info.method_id}|{method_info.standard_reference}|{verification_info.post_wipe_sha256}|{prior_audit_hash}"
         )
         event_hash = hashlib.sha256(data_to_hash.encode("utf-8")).hexdigest()
 
@@ -271,7 +278,18 @@ class ForensicCertificateEngine:
     @classmethod
     def export_pdf(cls, certificate: ForensicSanitizationCertificate, output_path: Union[str, pathlib.Path]) -> bytes:
         """Export certificate as professional PDF 1.4 document using pure standard library."""
-        writer = PurePythonPDFWriter(title=f"DREX Certificate - {certificate.certificate_id}")
+        # Determine appropriate NIST standard banner based on method profile or standard reference
+        std_ref = certificate.method.standard_reference
+        nist_prof = certificate.method.nist_profile
+        if nist_prof == "REV_1" or "Rev. 1" in std_ref or "REV1" in std_ref:
+            banner = "NIST SP 800-88 Rev. 1 Aligned (Legacy/Historical) & ISO/IEC 27037 Referenced Evidence Record"
+        else:
+            banner = "NIST SP 800-88 Rev. 2 Aligned (Current) & ISO/IEC 27037 Referenced Evidence Record"
+
+        writer = PurePythonPDFWriter(
+            title=f"DREX Certificate - {certificate.certificate_id}",
+            standard_banner=banner,
+        )
 
         writer.add_line(f"Certificate ID: {certificate.certificate_id}   |   Issued: {certificate.timestamp_utc}")
         writer.add_line(f"Case Reference: {certificate.case_id} - {certificate.case_name}")
@@ -324,16 +342,19 @@ class ForensicCertificateEngine:
             examiner = cert_dict["examiner_name"]
             target_name = cert_dict["target"]["target_name"]
             method_id = cert_dict["method"]["method_id"]
+            method_std = cert_dict.get("method", {}).get("standard_reference", "")
             post_sha = cert_dict["verification"]["post_wipe_sha256"]
             prior_hash = cert_dict["audit_chain_prior_hash"]
             event_hash = cert_dict["audit_chain_event_hash"]
             timestamp = cert_dict["timestamp_utc"]
             sig = cert_dict["tamper_evident_signature"]
 
-            expected_data = f"{cert_id}|{case_id}|{examiner}|{target_name}|{method_id}|{post_sha}|{prior_hash}"
-            calc_event_hash = hashlib.sha256(expected_data.encode("utf-8")).hexdigest()
+            expected_data_with_std = f"{cert_id}|{case_id}|{examiner}|{target_name}|{method_id}|{method_std}|{post_sha}|{prior_hash}"
+            expected_data_legacy = f"{cert_id}|{case_id}|{examiner}|{target_name}|{method_id}|{post_sha}|{prior_hash}"
+            calc_event_hash_std = hashlib.sha256(expected_data_with_std.encode("utf-8")).hexdigest()
+            calc_event_hash_legacy = hashlib.sha256(expected_data_legacy.encode("utf-8")).hexdigest()
 
-            if calc_event_hash != event_hash:
+            if event_hash not in (calc_event_hash_std, calc_event_hash_legacy):
                 return False
 
             expected_sig_payload = f"{event_hash}:{prior_hash}:{timestamp}"

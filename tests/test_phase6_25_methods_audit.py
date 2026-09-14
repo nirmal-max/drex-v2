@@ -140,3 +140,53 @@ def test_certification_binding_for_25_methods(tmp_path):
         assert cert.truth_model.execution == "REAL"
         assert cert.truth_model.physical_execution == "NOT_EXECUTED"
         assert cert.truth_model.physical_qualification == "NOT_ESTABLISHED"
+
+
+def test_m01_and_m12_dual_nist_profile_support(tmp_path):
+    """Verify Method 01 and Method 12 support both NIST SP 800-88 Rev. 1 and Rev. 2 profiles explicitly."""
+    target_f = tmp_path / "nist_eval_file.bin"
+    target_f.write_bytes(b"NIST_EVALUATION_DATA" * 30)
+
+    # 1. M01 under Rev. 1 Profile
+    res_m01_rev1 = FileSanitizer.wipe_file(
+        target_f,
+        standard=SanitizationStandard.NIST_800_88_REV1_CLEAR,
+        unlink_after=False,
+    )
+    assert res_m01_rev1.status == FileSanitizationStatus.SUCCESS
+    assert "Rev. 1 aligned" in res_m01_rev1.standard_label
+
+    # 2. M01 under Rev. 2 Profile (Default)
+    target_f.write_bytes(b"NIST_EVALUATION_DATA_R2" * 30)
+    res_m01_rev2 = FileSanitizer.wipe_file(
+        target_f,
+        standard=SanitizationStandard.NIST_800_88_REV2_CLEAR,
+        unlink_after=False,
+    )
+    assert res_m01_rev2.status == FileSanitizationStatus.SUCCESS
+    assert "Rev. 2 aligned" in res_m01_rev2.standard_label
+
+    # 3. M12 Policy Decision Matrix Binding
+    for rev_id, rev_label, is_curr in [
+        ("REV_1", "NIST SP 800-88 Rev. 1 aligned", False),
+        ("REV_2", "NIST SP 800-88 Rev. 2 aligned", True),
+    ]:
+        m12_cert = ForensicCertificateEngine.create_certificate(
+            case_id=f"CASE-M12-{rev_id}",
+            case_name="NIST Policy Evaluation",
+            examiner_name="Policy Engine",
+            organization="Compliance Lab",
+            target_info=CertificateTargetInfo(target_name="LOGICAL_POLICY_TARGET", target_type="VOLUME"),
+            method_info=CertificateMethodInfo(
+                method_id=12,
+                canonical_name=CANONICAL_25_METHODS[12]["name"],
+                standard_reference=rev_label,
+                nist_profile=rev_id,
+            ),
+            verification_info=CertificateVerificationInfo(
+                primary_verification_method="POLICY_RULE_EVALUATION",
+                exact_readback_verified=True,
+            ),
+        )
+        assert m12_cert.method.nist_profile == rev_id
+        assert rev_label in m12_cert.method.standard_reference

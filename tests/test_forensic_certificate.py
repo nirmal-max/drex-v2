@@ -83,10 +83,11 @@ def test_export_pure_python_pdf(tmp_path):
     method = CertificateMethodInfo(
         method_id=14,
         canonical_name="Single-Pass Zero Overwrite",
-        standard_reference="NIST SP 800-88 Rev. 1 Clear",
+        standard_reference="NIST SP 800-88 Rev. 2 Clear",
         pass_count=1,
         pattern_description="0x00 Zero-Fill",
     )
+
     verification = CertificateVerificationInfo(
         primary_verification_method="EXACT_BYTE_READBACK",
         exact_readback_verified=True,
@@ -113,4 +114,57 @@ def test_export_pure_python_pdf(tmp_path):
     assert pdf_bytes.startswith(b"%PDF-1.4")
     assert b"%%EOF" in pdf_bytes
     assert b"DREX-V2 FORENSIC SANITIZATION CERTIFICATE" in pdf_bytes
+    assert b"NIST SP 800-88 Rev. 2 Aligned" in pdf_bytes
     assert b"xref" in pdf_bytes
+
+
+def test_certificate_nist_rev1_vs_rev2_binding(tmp_path):
+    """Verify certificates explicitly differentiate Rev. 1 (Legacy) vs Rev. 2 (Current) and bind to PDF."""
+    target = CertificateTargetInfo(target_name="C:\\Evidence\\doc.pdf", target_type="FILE")
+    verification = CertificateVerificationInfo(primary_verification_method="EXACT_BYTE_READBACK", exact_readback_verified=True)
+
+    # 1. Rev. 1 Certificate
+    method_rev1 = CertificateMethodInfo(
+        method_id=1,
+        canonical_name="NIST SP 800-88 Rev. 1 Clear",
+        standard_reference="NIST SP 800-88 Rev. 1 aligned",
+        nist_profile="REV_1",
+    )
+    cert_rev1 = ForensicCertificateEngine.create_certificate(
+        case_id="CASE-REV1",
+        case_name="Legacy Validation",
+        examiner_name="Analyst",
+        organization="Lab",
+        target_info=target,
+        method_info=method_rev1,
+        verification_info=verification,
+    )
+    pdf_rev1_bytes = ForensicCertificateEngine.export_pdf(cert_rev1, tmp_path / "cert_rev1.pdf")
+    assert b"Rev. 1 Aligned (Legacy/Historical)" in pdf_rev1_bytes
+
+    # 2. Rev. 2 Certificate
+    method_rev2 = CertificateMethodInfo(
+        method_id=1,
+        canonical_name="NIST SP 800-88 Rev. 2 Clear",
+        standard_reference="NIST SP 800-88 Rev. 2 aligned",
+        nist_profile="REV_2",
+    )
+    cert_rev2 = ForensicCertificateEngine.create_certificate(
+        case_id="CASE-REV2",
+        case_name="Current Validation",
+        examiner_name="Analyst",
+        organization="Lab",
+        target_info=target,
+        method_info=method_rev2,
+        verification_info=verification,
+    )
+    pdf_rev2_bytes = ForensicCertificateEngine.export_pdf(cert_rev2, tmp_path / "cert_rev2.pdf")
+    assert b"Rev. 2 Aligned (Current)" in pdf_rev2_bytes
+
+    # 3. Verify standard_reference tamper resistance
+    cert_dict = json.loads(ForensicCertificateEngine.export_json(cert_rev2, tmp_path / "cert_rev2.json"))
+    assert ForensicCertificateEngine.verify_certificate_integrity(cert_dict) is True
+
+    # Tampering standard reference must fail verification
+    cert_dict["method"]["standard_reference"] = "NIST SP 800-88 Rev. 1 aligned"
+    assert ForensicCertificateEngine.verify_certificate_integrity(cert_dict) is False

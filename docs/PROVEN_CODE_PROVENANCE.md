@@ -354,18 +354,19 @@
 
 ---
 
-### PROV-P6-006: NIST SP 800-88 Rev. 1 & Appendix C Forensic Certification Standard
-- **Source Project:** NIST Special Publication 800-88 Rev. 1 (Guidelines for Media Sanitization)
+### PROV-P6-006: NIST SP 800-88 Rev. 2 & Appendix C Forensic Certification Standard
+- **Source Project:** NIST Special Publication 800-88 Rev. 2 (Guidelines for Media Sanitization)
 - **Source Authority:** National Institute of Standards and Technology (US Department of Commerce)
-- **Publication Date:** December 2014
+- **Publication Date:** September 2025 (superseding Rev. 1 Dec 2014, retained for historical comparison)
 - **License:** US Public Domain (Government Work)
 - **License Status:** COMPATIBLE / NON-BLOCKING (Direct government standard)
 - **DREX Destination File:** `certificate_engine.py`
 - **DREX Destination Symbol:** `ForensicCertificateEngine`, `ForensicSanitizationCertificate`
 - **Adaptation Type:** DIRECT_STANDARD_IMPLEMENTATION
-- **Reason for Reuse:** Industry standard for Clear/Purge definitions and Appendix C Certificate of Sanitization schema requirements.
+- **Reason for Reuse:** Current industry standard for Clear/Purge decision matrices and Appendix C Certificate of Sanitization schema requirements.
 - **Dependencies:** None (Pure Python standard library).
 - **Validation Evidence:** `tests/test_forensic_certificate.py`.
+
 
 
 

@@ -33,14 +33,21 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 # ─── Enumerations ─────────────────────────────────────────────────────────────
 
+class NISTProfile(enum.Enum):
+    REV_1 = "REV_1"  # NIST SP 800-88 Rev. 1 (Legacy / Historical profile)
+    REV_2 = "REV_2"  # NIST SP 800-88 Rev. 2 (Current profile)
+
+
 class SanitizationStandard(enum.Enum):
-    NIST_800_88_CLEAR = "NIST_800_88_CLEAR"        # 1-pass zero or pseudorandom + readback sample
-    DOD_5220_22_M_3PASS = "DOD_5220_22_M_3PASS"    # 3-pass (0x00, 0xFF, CSPRNG) + verify
-    DOD_5220_22_M_7PASS = "DOD_5220_22_M_7PASS"    # 7-pass DoD ECE sequence + verify
-    HMG_IS5_ENHANCED = "HMG_IS5_ENHANCED"          # 3-pass (0x00, 0xFF, CSPRNG) + verify
-    GUTMANN_35PASS = "GUTMANN_35PASS"              # 35-pass magnetic transition table
-    CSPRNG_OVERWRITE = "CSPRNG_OVERWRITE"          # Cryptographically secure random stream
-    SINGLE_PASS_ZERO = "SINGLE_PASS_ZERO"          # Single pass 0x00 zero-fill
+    NIST_800_88_REV1_CLEAR = "NIST_800_88_REV1_CLEAR"  # NIST SP 800-88 Rev. 1 Clear (Legacy / Historical profile)
+    NIST_800_88_REV2_CLEAR = "NIST_800_88_REV2_CLEAR"  # NIST SP 800-88 Rev. 2 Clear (Current profile)
+    NIST_800_88_CLEAR = "NIST_800_88_CLEAR"            # Standard NIST Clear (Defaults to Rev. 2 / Current profile)
+    DOD_5220_22_M_3PASS = "DOD_5220_22_M_3PASS"        # 3-pass (0x00, 0xFF, CSPRNG) + verify
+    DOD_5220_22_M_7PASS = "DOD_5220_22_M_7PASS"        # 7-pass DoD ECE sequence + verify
+    HMG_IS5_ENHANCED = "HMG_IS5_ENHANCED"              # 3-pass (0x00, 0xFF, CSPRNG) + verify
+    GUTMANN_35PASS = "GUTMANN_35PASS"                  # 35-pass magnetic transition table
+    CSPRNG_OVERWRITE = "CSPRNG_OVERWRITE"              # Cryptographically secure random stream
+    SINGLE_PASS_ZERO = "SINGLE_PASS_ZERO"              # Single pass 0x00 zero-fill
 
 
 class FileSanitizationStatus(enum.Enum):
@@ -88,6 +95,8 @@ class FileWipeResult:
     qualification_state: str = "SOFTWARE-QUALIFIED"
     physical_execution: str = "NOT_EXECUTED"
     physical_qualification: str = "NOT_ESTABLISHED"
+    nist_profile: Optional[NISTProfile] = None
+    standard_label: str = "NIST SP 800-88 Rev. 2 aligned"
 
 
 @dataclass
@@ -172,10 +181,29 @@ class FileSanitizer:
         standard: SanitizationStandard = SanitizationStandard.NIST_800_88_CLEAR,
         unlink_after: bool = True,
         scramble_metadata: bool = True,
+        nist_profile: Optional[NISTProfile] = None,
     ) -> FileWipeResult:
         """Sanitize a single target file using the specified standard overwrite sequence."""
         target = pathlib.Path(file_path)
         start_time = time.time()
+
+        # Resolve explicit NIST revision profile
+        resolved_profile: Optional[NISTProfile] = None
+        if standard == SanitizationStandard.NIST_800_88_REV1_CLEAR:
+            resolved_profile = NISTProfile.REV_1
+            standard_label = "NIST SP 800-88 Rev. 1 aligned (Legacy / Historical profile)"
+        elif standard == SanitizationStandard.NIST_800_88_REV2_CLEAR:
+            resolved_profile = NISTProfile.REV_2
+            standard_label = "NIST SP 800-88 Rev. 2 aligned (Current profile)"
+        elif standard == SanitizationStandard.NIST_800_88_CLEAR:
+            resolved_profile = nist_profile if nist_profile is not None else NISTProfile.REV_2
+            if resolved_profile == NISTProfile.REV_1:
+                standard_label = "NIST SP 800-88 Rev. 1 aligned (Legacy / Historical profile)"
+            else:
+                standard_label = "NIST SP 800-88 Rev. 2 aligned (Current profile)"
+        else:
+            resolved_profile = None
+            standard_label = standard.value
 
         if not target.is_file():
             return FileWipeResult(
@@ -190,6 +218,8 @@ class FileSanitizer:
                 start_time=start_time,
                 end_time=time.time(),
                 error_message=f"File not found or not a regular file: {target}",
+                nist_profile=resolved_profile,
+                standard_label=standard_label,
             )
 
         # 1. Pre-wipe SHA-256 calculation
@@ -264,6 +294,8 @@ class FileSanitizer:
                 status=FileSanitizationStatus.SUCCESS,
                 start_time=start_time,
                 end_time=time.time(),
+                nist_profile=resolved_profile,
+                standard_label=standard_label,
             )
 
 
@@ -280,6 +312,8 @@ class FileSanitizer:
                 start_time=start_time,
                 end_time=time.time(),
                 error_message=str(e),
+                nist_profile=resolved_profile,
+                standard_label=standard_label,
             )
 
     @classmethod
@@ -288,6 +322,7 @@ class FileSanitizer:
         dir_path: Union[str, pathlib.Path],
         standard: SanitizationStandard = SanitizationStandard.NIST_800_88_CLEAR,
         unlink_after: bool = True,
+        nist_profile: Optional[NISTProfile] = None,
     ) -> List[FileWipeResult]:
         """Recursively sanitize all files in a directory tree, followed by folder removal."""
         results: List[FileWipeResult] = []
@@ -300,7 +335,7 @@ class FileSanitizer:
         for root, _, files in os.walk(root_dir, topdown=False):
             for file_name in files:
                 full_path = pathlib.Path(root) / file_name
-                res = cls.wipe_file(full_path, standard=standard, unlink_after=unlink_after)
+                res = cls.wipe_file(full_path, standard=standard, unlink_after=unlink_after, nist_profile=nist_profile)
                 results.append(res)
 
         # 2. Remove directories from leaves up
@@ -335,9 +370,12 @@ class FileSanitizer:
     @classmethod
     def _get_pass_sequence(cls, standard: SanitizationStandard) -> List[Optional[Union[int, bytes]]]:
         """Return the pattern sequence for the chosen standard."""
-        if standard == SanitizationStandard.SINGLE_PASS_ZERO:
-            return [0x00]
-        elif standard == SanitizationStandard.NIST_800_88_CLEAR:
+        if standard in (
+            SanitizationStandard.SINGLE_PASS_ZERO,
+            SanitizationStandard.NIST_800_88_CLEAR,
+            SanitizationStandard.NIST_800_88_REV1_CLEAR,
+            SanitizationStandard.NIST_800_88_REV2_CLEAR,
+        ):
             return [0x00]
         elif standard == SanitizationStandard.CSPRNG_OVERWRITE:
             return [None]
