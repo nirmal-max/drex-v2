@@ -27,6 +27,16 @@ from typing import Any, Callable
 from recovery_adapter import QuickRecoveryAdapter, RecoveryDispatcher, RecoveryError, RecoveryScan
 from entropy_engine import calculate_shannon_entropy, evaluate_sanitization_entropy
 from vss_sanitizer import VssSanitizer
+from hardware_storage import (
+    DeviceIntelligenceEngine,
+    Qualification25MethodEngine,
+    DeviceIdentitySnapshot,
+    MethodQualificationRecord,
+    TransportBus,
+    MediaType,
+    UnderlyingInterface,
+    QualificationStatus,
+)
 
 
 APP_NAME = "DREX"
@@ -113,6 +123,14 @@ class DriveInfo:
     health: str | None = None
     status: str | None = None
     device_id: str | None = None
+    transport_bus: str = "UNKNOWN"
+    underlying_interface: str = "UNKNOWN"
+    media_type: str = "UNKNOWN"
+    sector_size: int = 512
+    is_usb_bridge: bool = False
+    is_system_or_boot: bool = False
+    identity_snapshot: DeviceIdentitySnapshot | None = None
+    qualification_matrix: dict[int, MethodQualificationRecord] | None = None
 
     def display(self, field: str) -> str:
         value = getattr(self, field, None)
@@ -192,6 +210,30 @@ def discover_drives() -> list[DriveInfo]:
         if size is None and phys_size is not None and str(phys_size).isdigit():
             size = int(phys_size)
 
+        # Authoritative Device Intelligence & 25-Method Qualification Integration
+        snap = None
+        matrix = None
+        t_bus = str(interface or "UNKNOWN").upper()
+        underlying = "UNKNOWN"
+        media = "UNKNOWN"
+        sec_sz = 512
+        is_usb = False
+        is_sys = False
+
+        target_path = str(device_id or letter)
+        if target_path:
+            try:
+                snap = DeviceIntelligenceEngine.create_snapshot(target_path)
+                matrix = Qualification25MethodEngine.evaluate_25_methods(snap)
+                t_bus = snap.transport_bus.value.value
+                underlying = snap.underlying_interface.value.value
+                media = snap.media_type.value.value
+                sec_sz = snap.logical_sector_size.value
+                is_usb = snap.is_usb_bridge.value
+                is_sys = snap.system_disk_relationship.value or snap.boot_disk_relationship.value
+            except Exception:
+                pass
+
         out.append(DriveInfo(
             path=letter + "\\", device_path=str(device_id or ""),
             model=str(model).strip() if model else None,
@@ -200,6 +242,9 @@ def discover_drives() -> list[DriveInfo]:
             drive_type=drive_type or "Unavailable", filesystem=item.get("FileSystem"),
             free=free, health="OK" if str(status).lower() == "ok" else (str(status) if status else "Unavailable"),
             status=str(status) if status else None, device_id=str(device_id) if device_id else None,
+            transport_bus=t_bus, underlying_interface=underlying, media_type=media,
+            sector_size=sec_sz, is_usb_bridge=is_usb, is_system_or_boot=is_sys,
+            identity_snapshot=snap, qualification_matrix=matrix,
         ))
     if out:
         return out

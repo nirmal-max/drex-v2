@@ -508,11 +508,19 @@ class DestructiveHardwareTripwire:
     @staticmethod
     def assert_safe_execution(device_path: str, command_context: str) -> None:
         """Throw RuntimeError if real physical device mutation is attempted during tests."""
+        # Never allow PhysicalDrive0 or system/boot drives under any circumstances
+        m0 = re.search(r"PhysicalDrive0\b", device_path, re.IGNORECASE)
+        if m0 or device_path.upper() in (r"\\.\C:", "C:", "C:\\"):
+            raise RuntimeError(
+                f"SAFETY TRIPWIRE TRIGGERED: Destructive command '{command_context}' against system/boot "
+                f"device '{device_path}' is strictly forbidden."
+            )
+
         is_physical = bool(re.search(r"PhysicalDrive\d+", device_path, re.IGNORECASE))
         auth_device = os.environ.get("DREX_PHYSICAL_TEST_DEVICE", "").strip()
         auth_flag = os.environ.get("DREX_PHYSICAL_TEST_AUTHORIZED", "").strip().upper() == "YES"
 
-        if is_physical and not (auth_flag and (auth_device.upper() == device_path.upper() or auth_device == "*")):
+        if is_physical and not (auth_flag and auth_device and auth_device.upper() == device_path.upper()):
             # Running inside test harness or unauthorized environment
             raise RuntimeError(
                 f"SAFETY TRIPWIRE TRIGGERED: Destructive command '{command_context}' against host storage "
@@ -1503,7 +1511,7 @@ class DriveWipeHardwareBackend:
         env_test_auth = os.environ.get("DREX_PHYSICAL_TEST_AUTHORIZED", "").strip().upper()
         is_physical_authorized = bool(
             env_test_device
-            and (env_test_device.upper() == device_path.upper() or env_test_device == "*")
+            and (env_test_device.upper() == device_path.upper())
             and env_test_auth == "YES"
         )
 

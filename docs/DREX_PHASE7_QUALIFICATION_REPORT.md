@@ -98,27 +98,27 @@ flowchart TD
 | **M02** | Smart Sanitization | Drive Erasure | Heuristic Multi-Tier Evaluator | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
 | **M03** | Device-Native Sanitize | Drive Erasure | DriveWipe IOCTL Pass-Through | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
 | **M04** | ATA Secure Erase | Drive Erasure | DriveWipe ATA Pass-Through | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M05** | NVMe Secure Erase | Drive Erasure | DriveWipe NVMe Admin Sanitize | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M06** | IEEE 2883 Enterprise Purge | Enterprise | Enterprise Storage Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M07** | Multi-Pass Block Overwrite | Overwrite | Block Direct Overwrite Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M08** | CSPRNG Random Overwrite | Overwrite | CSPRNG Streaming Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M09** | Cryptographic Erasure | Crypto | SED Key Invalidation Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M10** | File Slack Sanitization | File / Extent | Cluster-Tip Zeroing Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M11** | Metadata Sanitization | File / Extent | MFT / Inode Scrubbing Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M12** | NIST SP 800-88 File Erasure | File / Extent | File Overwrite & Truncate Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M13** | Free-Space Wiping | Volume | Free-Space Allocator & Scrub | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M14** | Single-Pass Zero Overwrite | Overwrite | Streaming Zero Overwrite Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M15** | Storage-Aware Sanitization | Dynamic | Dynamic Media Decision Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M16** | VSS / Shadow Copy Scrub | System | VSS Admin & Snapshot Scrub | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M17** | Raw Sector Carving | Forensic Recovery | Deep Signature Carver Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M18** | Filesystem Tree Reconstruction | Forensic Recovery | TSK Directory Tree Walker | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M19** | Deleted File Recovery | Forensic Recovery | Inode / MFT Record Restorer | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M20** | Damaged Partition Recovery | Forensic Recovery | Superblock / VBR Scanner | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M21** | Bad Sector Map Imaging | Forensic Recovery | Bad Sector Resilient Imager | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M22** | Non-Contiguous Fragment Carver | Forensic Recovery | Bi-Directional Fragment Splicer | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M23** | Forensic Timeline Generation | Forensic Recovery | MACB Chronological Timeline | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M24** | File Hash Identity Verification | Forensic Recovery | Multi-Algorithm Hasher | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
-| **M25** | Entropy Data Analysis | Forensic Recovery | Shannon Entropy Distribution Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M05** | NVMe Secure Erase | Drive Erasure | DriveWipe NVMe Admin Protocol | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M06** | IEEE 2883 Purge | Drive Erasure | IEEE 2883 Policy Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M07** | Verified Overwrite | Drive Erasure | Direct Block Multi-Pass Overwrite | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M08** | CSPRNG Random Overwrite | File/Folder Erasure | CSPRNG Stream Overwrite | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M09** | Cryptographic Erasure | File/Folder Erasure | Key Lifecycle Invalidation | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M10** | File Slack / Cluster-Tip | File/Folder Erasure | SlackSanitizer Extent Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M11** | Filesystem Metadata Sanitization | File/Folder Erasure | 9-Stage MFTSanitizer + VSS | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M12** | NIST SP 800-88 File Policy Engine | File/Folder Erasure | File Policy Dispatcher | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M13** | Secure Free-Space Wiping | File/Folder Erasure | FreeSpaceSanitizer Headroom Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M14** | Single-Pass Zero Overwrite | File/Folder Erasure | Single-Pass Zero Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M15** | Storage-Aware Sanitization Fallback | File/Folder Erasure | Storage Controller Fallback Matrix | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M16** | Temporary / Cache Sanitization | File/Folder Erasure | Temp Cache Scrubber | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M17** | Quick Recovery | Recovery | TSK fls + icat | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M18** | Smart Recovery | Recovery | TSK fsstat + fls + Carving | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M19** | Targeted Recovery | Recovery | TSK icat Inode Extraction | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M20** | Filesystem Recovery | Recovery | TSK tsk_recover | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M21** | Deep Recovery | Recovery | PhotoRec 7.2 + DREX Native Carver | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M22** | Fragment Recovery | Recovery | DREX Native Fragment Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M23** | RAID / Storage Recovery | Recovery | DREX Native RAID Engine | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M24** | Damaged Media Recovery | Recovery | DREX Damaged Media Imager + ddrescue | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
+| **M25** | Forensic Recovery | Recovery | Forensic Vault + Audit Ledger | `SOFTWARE-QUALIFIED` | `NOT_EXECUTED` | `NOT_ESTABLISHED` |
 
 ---
 
@@ -129,11 +129,11 @@ flowchart TD
 DREX-V2 Full Regression Suite Summary
 ======================================================================
 Baseline Tests (Phase 1–6):  510 PASS
-Phase 7 New Tests:            26 PASS
-Total Test Count:            536 PASS
+Phase 7 New Tests:            60 PASS (across 8 test suites)
+Total Test Count:            570 PASS
 Failures:                      0
 Skipped:                       0
-Total Execution Time:        98.37s
+Total Execution Time:        84.18s
 Working Tree:                CLEAN
 ======================================================================
 ```
@@ -143,9 +143,10 @@ Working Tree:                CLEAN
 2. `tests/test_hardware_capability_detection.py` — 3 passed
 3. `tests/test_hardware_safety_and_locking.py` — 4 passed
 4. `tests/test_device_identity_stability.py` — 4 passed
-5. `tests/test_destructive_execution_gate.py` — 5 passed
+5. `tests/test_destructive_execution_gate.py` — 12 passed
 6. `tests/test_25_methods_hardware_qualification.py` — 4 passed
 7. `tests/test_device_intelligence_evidence_and_certificates.py` — 2 passed
+8. `tests/test_canonical_25_method_integrity.py` — 27 passed (3 functions + 25 parameterized tests)
 
 ---
 
