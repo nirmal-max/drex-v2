@@ -169,6 +169,65 @@ class RecoveryCandidateRecord(BaseModel):
     offset: int = 0
     is_recovered: bool = False
     validation_verdict: str = "VALIDATED"
+    validation_state: str = "CANDIDATE"  # "CANDIDATE", "VALIDATED_CANDIDATE", "RECONSTRUCTED_CANDIDATE", "RECOVERED_ARTIFACT"
+    limitations: List[str] = Field(default_factory=list)
+
+
+class FragmentChunkModel(BaseModel):
+    chunk_id: int
+    offset: int
+    data_hex: Optional[str] = None
+    size_bytes: int = 0
+    entropy: Optional[float] = None
+    is_header: bool = False
+    is_footer: bool = False
+
+
+class RecoveryReconstructRequest(BaseModel):
+    case_id: str = Field(..., max_length=64)
+    file_type: str = Field(..., max_length=32)
+    filename: Optional[str] = Field(None, max_length=255)
+    fragments: List[FragmentChunkModel]
+    source_target: Optional[str] = None
+    strict_structure_validation: bool = True
+
+
+class RecoveryReconstructResponse(BaseModel):
+    reconstruction_id: str
+    case_id: str
+    file_type: str
+    filename: str
+    total_size_bytes: int
+    is_valid_structure: bool
+    validation_verdict: str
+    reconstruction_confidence: float
+    seam_scores: List[float] = Field(default_factory=list)
+    sha256: str
+    candidate_id: str
+    state: str
+    limitations: List[str] = Field(default_factory=list)
+
+
+class RecoveryExtractRequest(BaseModel):
+    case_id: str = Field(..., max_length=64)
+    candidate_id: str = Field(..., max_length=64)
+    destination_subfolder: Optional[str] = Field("recovered_evidence", max_length=64)
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class RecoveryExtractResponse(BaseModel):
+    extract_id: str
+    case_id: str
+    candidate_id: str
+    vault_object_id: str
+    vault_path: str
+    filename: str
+    file_type: str
+    size_bytes: int
+    sha256: str
+    is_recovered: bool
+    audit_event_id: str
+    message: str
 
 
 # ─── Sanitization Models ──────────────────────────────────────────────────────

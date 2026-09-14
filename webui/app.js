@@ -277,30 +277,41 @@ function renderRecovery() {
       <td><span class="badge" style="background:#eaf3ff; color:#1769e0;">${esc(c.file_type)}</span></td>
       <td>${formatBytes(c.size_bytes)}</td>
       <td>
-        <span class="badge ${c.confidence_tier === 'HIGH' ? 'badge-pass' : 'badge-warn'}">
-          ${(c.confidence_score * 100).toFixed(1)}% (${esc(c.confidence_tier)})
+        <span class="badge ${c.confidence_tier === 'HIGH' ? 'badge-pass' : (c.confidence_tier === 'MEDIUM' ? 'badge-warn' : 'badge-danger')}">
+          ${c.confidence_score.toFixed(3)} (${esc(c.confidence_tier)})
+        </span>
+      </td>
+      <td>
+        <span class="badge ${c.is_recovered ? 'badge-pass' : (c.validation_state === 'RECONSTRUCTED_CANDIDATE' ? 'badge-info' : 'badge-neutral')}" style="font-size: 10px;">
+          ${esc(c.validation_state || (c.is_recovered ? 'RECOVERED_ARTIFACT' : 'CANDIDATE'))}
         </span>
       </td>
       <td><small style="color: var(--drex-text-muted);">${esc(c.provenance)}</small></td>
       <td><span class="badge badge-pass">${esc(c.validation_verdict)}</span></td>
+      <td>
+        ${!c.is_recovered ? `<button class="action-btn" style="padding: 4px 8px; font-size: 11px; background: var(--drex-primary); color: #fff;" onclick="triggerCandidateExtract('${esc(c.candidate_id)}')">📥 Ingest to Vault</button>` : `<span style="color:#168a4a; font-size:11px; font-weight:600;">✓ Vault Ingested</span>`}
+      </td>
     </tr>
   `).join('');
 
   return `
     <div class="card">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
         <div>
-          <div class="section-label">FORENSIC CARVING & INODE EXTRACTION</div>
-          <h2 class="card-title">Multi-Engine Recovery Candidates</h2>
+          <div class="section-label">FORENSIC CARVING & RECONSTRUCTION</div>
+          <h2 class="card-title">Multi-Engine Recovery & Fragment Candidates</h2>
         </div>
-        <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff; padding: 8px 14px;" onclick="triggerRecoveryScan()">⌕ Launch Safe Read-Only Scan</button>
+        <div style="display: flex; gap: 8px;">
+          <button class="action-btn" style="width: auto; background: var(--drex-surface-2); color: var(--drex-text); border: 1px solid var(--drex-border); padding: 8px 14px;" onclick="triggerFragmentReconstructionDemo()">🧩 Reconstruct Fragments</button>
+          <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff; padding: 8px 14px;" onclick="triggerRecoveryScan()">⌕ Launch Safe Read-Only Scan</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table class="table">
           <thead>
-            <tr><th>Candidate</th><th>Filename</th><th>Format</th><th>Size</th><th>Confidence</th><th>Provenance</th><th>Structural Verdict</th></tr>
+            <tr><th>Candidate</th><th>Filename</th><th>Format</th><th>Size</th><th>Evidence Confidence</th><th>State</th><th>Provenance</th><th>Structural Verdict</th><th>Vault Action</th></tr>
           </thead>
-          <tbody>${candidateRows || '<tr><td colspan="7">No candidates extracted.</td></tr>'}</tbody>
+          <tbody>${candidateRows || '<tr><td colspan="9">No candidates extracted.</td></tr>'}</tbody>
         </table>
       </div>
     </div>
@@ -571,15 +582,62 @@ async function triggerRecoveryScan() {
         engine: 'TSK',
       }),
     });
-    alert(`Safe Read-Only Recovery Scan Dispatched!\nJob ID: ${res.job_id}\nStatus: ${res.status}\nEngine: ${res.engine}`);
+    alert(`Recovery Scan initiated: Job ID ${res.job_id || 'N/A'}`);
+    await refreshState();
   } catch (ex) {
     alert(`Recovery Scan Notice: ${ex.message}`);
+  }
+}
+
+async function triggerCandidateExtract(candidateId) {
+  try {
+    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001';
+    const res = await api('/api/recovery/extract', {
+      method: 'POST',
+      body: JSON.stringify({
+        case_id: caseId,
+        candidate_id: candidateId,
+        notes: 'Analyst requested evidence vault ingestion',
+      }),
+    });
+    alert(`Candidate Extracted to Evidence Vault!\nVault Object ID: ${res.vault_object_id}\nFilename: ${res.filename}\nSHA-256: ${res.sha256.substring(0, 16)}...\nAudit Event: ${res.audit_event_id}`);
+    await refreshState();
+  } catch (ex) {
+    alert(`Vault Extraction Failed: ${ex.message}`);
+  }
+}
+
+async function triggerFragmentReconstructionDemo() {
+  try {
+    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001';
+    // Demonstrate deterministic bi-fragment PNG reconstruction
+    const hdrHex = '89504e470d0a1a0a0000000d49484452000000100000001008060000001ff3ff61';
+    const ftrHex = '0000000049454e44ae426082';
+    const res = await api('/api/recovery/reconstruct', {
+      method: 'POST',
+      body: JSON.stringify({
+        case_id: caseId,
+        file_type: 'PNG',
+        filename: 'reconstructed_evidence_telemetry.png',
+        fragments: [
+          { chunk_id: 1, offset: 0, data_hex: hdrHex, is_header: true, is_footer: false },
+          { chunk_id: 2, offset: 4096, data_hex: ftrHex, is_header: false, is_footer: true },
+        ],
+        strict_structure_validation: false,
+      }),
+    });
+    alert(`Fragment Reconstruction Completed!\nCandidate ID: ${res.candidate_id}\nState: ${res.state}\nVerdict: ${res.validation_verdict}\nEvidence Confidence: ${res.reconstruction_confidence.toFixed(3)}\nSHA-256: ${res.sha256.substring(0, 16)}...`);
+    await refreshState();
+  } catch (ex) {
+    alert(`Fragment Reconstruction Notice: ${ex.message}`);
   }
 }
 
 // Attach global event functions for inline HTML onclick attributes
 window.closeModal = closeModal;
 window.triggerRecoveryScan = triggerRecoveryScan;
+window.triggerCandidateExtract = triggerCandidateExtract;
+window.triggerFragmentReconstructionDemo = triggerFragmentReconstructionDemo;
 window.runJudgeProofLoop = runJudgeProofLoop;
 window.openDestructiveConfirm = openDestructiveConfirm;
 window.submitSanitization = submitSanitization;

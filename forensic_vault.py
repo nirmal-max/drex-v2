@@ -1174,8 +1174,8 @@ class ForensicCaseManager:
     Central orchestration service managing forensic cases, evidence sources,
     timelines, hash-chained audit ledgers, custody records, and evidence vaults.
     """
-    def __init__(self, base_data_dir: Path):
-        self.base_dir = base_data_dir.resolve()
+    def __init__(self, base_data_dir: Union[str, Path]):
+        self.base_dir = Path(base_data_dir).resolve()
         self.cases_dir = self.base_dir / "cases"
         self.cases_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -1674,6 +1674,174 @@ class ForensicCaseManager:
                 metadata=artifact.to_dict(),
             )
             return artifact
+
+    def add_recovery_candidate(
+        self,
+        case_id: str,
+        artifact: RecoveryArtifactRecord,
+        payload_bytes: Optional[bytes] = None,
+        actor: str = "Examiner",
+    ) -> RecoveryArtifactRecord:
+        """Atomically persist a discovery/reconstruction candidate and its raw payload."""
+        with self._lock:
+            cdir = self._case_path(case_id)
+            cand_dir = cdir / "candidates"
+            cand_dir.mkdir(parents=True, exist_ok=True)
+
+            if payload_bytes is not None:
+                p_file = cand_dir / f"{artifact.candidate_id}.bin"
+                p_file.write_bytes(payload_bytes)
+                artifact.output_size = len(payload_bytes)
+                artifact.output_hash = hashlib.sha256(payload_bytes).hexdigest()
+
+            cand_file = cdir / "candidates.json"
+            rows = []
+            if cand_file.is_file():
+                try:
+                    rows = json.loads(cand_file.read_text(encoding="utf-8"))
+                except Exception:
+                    rows = []
+            rows = [r for r in rows if r.get("candidate_id") != artifact.candidate_id]
+            rows.append(artifact.to_dict())
+            safe_atomic_json_write(cand_file, rows)
+            return artifact
+
+    def list_recovery_candidates(
+        self,
+        case_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        file_type: Optional[str] = None,
+        validation_state: Optional[str] = None,
+    ) -> List[RecoveryArtifactRecord]:
+        """List and filter candidate records for a case with pagination."""
+        with self._lock:
+            cdir = self._case_path(case_id)
+            cand_file = cdir / "candidates.json"
+            if not cand_file.is_file():
+                return []
+            try:
+                data = json.loads(cand_file.read_text(encoding="utf-8"))
+                recs = [RecoveryArtifactRecord.from_dict(d) for d in data if isinstance(d, dict)]
+                if file_type:
+                    recs = [r for r in recs if r.carving_method.upper() == file_type.upper() or (r.filesystem_origin and file_type.lower() in r.filesystem_origin.lower())]
+                if validation_state:
+                    recs = [r for r in recs if r.validation_state.value.upper() == validation_state.upper()]
+                return recs[offset : offset + limit]
+            except Exception:
+                return []
+
+    def get_recovery_candidate(self, case_id: str, candidate_id: str) -> Optional[RecoveryArtifactRecord]:
+        """Get candidate record by ID."""
+        with self._lock:
+            cdir = self._case_path(case_id)
+            cand_file = cdir / "candidates.json"
+            if not cand_file.is_file():
+                return None
+            try:
+                data = json.loads(cand_file.read_text(encoding="utf-8"))
+                for d in data:
+                    if d.get("candidate_id") == candidate_id:
+                        return RecoveryArtifactRecord.from_dict(d)
+                return None
+            except Exception:
+                return None
+
+    def get_recovery_candidate_payload(self, case_id: str, candidate_id: str) -> Optional[bytes]:
+        """Get candidate raw bytes if available."""
+        with self._lock:
+            cdir = self._case_path(case_id)
+            p_file = cdir / "candidates" / f"{candidate_id}.bin"
+            if p_file.is_file():
+                return p_file.read_bytes()
+            return None
+
+    def promote_recovery_candidate_to_vault(
+        self,
+        case_id: str,
+        candidate_id: str,
+        examiner: str,
+        destination_filename: Optional[str] = None,
+        notes: str = "",
+    ) -> Tuple[RecoveryArtifactRecord, VaultObject]:
+        """
+        Promote a candidate to an authenticated VaultObject in the Evidence Vault.
+        Validates structural integrity, writes to recovered vault, and records audit chain event.
+        """
+        with self._lock:
+            cand = self.get_recovery_candidate(case_id, candidate_id)
+            if not cand:
+                raise KeyError(f"Recovery candidate '{candidate_id}' not found in case '{case_id}'.")
+
+            payload = self.get_recovery_candidate_payload(case_id, candidate_id)
+            if not payload:
+                raise ValueError(f"Recovery candidate payload for '{candidate_id}' is empty or missing.")
+
+            # Validate structural integrity via FormatRegistry
+            from validators import FormatRegistry, CandidateState
+            fmt = cand.carving_method.upper()
+            if not fmt and cand.filesystem_origin and "." in cand.filesystem_origin:
+                fmt = cand.filesystem_origin.split(".")[-1].upper()
+            
+            val_res = FormatRegistry.validate_buffer(fmt, payload)
+            if not val_res.is_valid:
+                v_state = getattr(val_res, 'state', CandidateState.DISCOVERED).value
+                v_conf = val_res.evidence.composite_score() if hasattr(val_res, 'evidence') else 0.0
+                raise ValueError(
+                    f"Structural validation rejected candidate '{candidate_id}' for format {fmt}: "
+                    f"{v_state} (Confidence: {v_conf:.2f})"
+                )
+
+            vault = self.get_vault(case_id)
+            dest_name = sanitize_filename(destination_filename or cand.filesystem_origin or f"recovered_{candidate_id}.bin")
+
+            with tempfile.NamedTemporaryFile(delete=False) as tf:
+                tf.write(payload)
+                tmp_p = Path(tf.name)
+            try:
+                vault_obj = vault.store_file(
+                    case_id=case_id,
+                    source_path=tmp_p,
+                    object_type=VaultObjectType.RECOVERED,
+                    destination_name=dest_name,
+                    source_evidence_id=cand.source_evidence_id,
+                    generating_operation_id=cand.candidate_id,
+                    metadata={"candidate_id": candidate_id, "confidence": cand.evidence_confidence_score, "notes": notes},
+                    copy_file=True,
+                )
+            finally:
+                if tmp_p.exists():
+                    tmp_p.unlink(missing_ok=True)
+
+            # Update candidate state to RECOVERED_ARTIFACT
+            cand.validation_state = RecoveryCandidateState.RECOVERED_ARTIFACT
+            self.add_recovery_candidate(case_id, cand, payload, actor=examiner)
+
+            # Record timeline and audit events
+            self._record_timeline_event(
+                case_id=case_id,
+                event_type=TimelineEventType.RECOVERY_COMPLETED,
+                actor=examiner,
+                description=f"Candidate '{candidate_id}' validated and ingested into Vault as '{dest_name}'.",
+                source="ForensicVault",
+                evidence_id=cand.source_evidence_id,
+                metadata={"vault_object_id": vault_obj.object_id, "sha256": vault_obj.sha256_hash, "size": vault_obj.size_bytes},
+            )
+            self._append_audit_event(
+                case_id=case_id,
+                actor=examiner,
+                event_type="EVIDENCE_ACQUIRED",
+                payload={
+                    "candidate_id": candidate_id,
+                    "vault_object_id": vault_obj.object_id,
+                    "sha256": vault_obj.sha256_hash,
+                    "size_bytes": vault_obj.size_bytes,
+                    "destination_name": dest_name,
+                },
+                operation_id=cand.candidate_id,
+            )
+
+            return cand, vault_obj
 
     def list_recovery_artifacts(self, case_id: str) -> List[RecoveryArtifactRecord]:
         with self._lock:

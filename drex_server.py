@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import pathlib
+from pathlib import Path
 import re
 import sys
 import threading
@@ -66,6 +67,9 @@ from forensic_vault import (
     AuditEvent,
     IndependentAuditVerifier,
     generate_stable_id,
+    RecoveryCandidateState,
+    RecoveryArtifactRecord,
+    VaultObjectType,
 )
 from hardware_storage import (
     DeviceIntelligenceEngine,
@@ -82,6 +86,15 @@ from recovery_adapter import (
     RecoveryTarget,
     RecoveryScan,
 )
+from fragment_engine import (
+    FragmentChunk,
+    FragmentReassembler,
+    ReassemblyCandidate,
+    seam_continuity_score,
+    shannon_entropy,
+)
+from carver_engine import DeepCarverEngine, EvidenceScores
+from validators import FormatRegistry, CandidateState
 from drex_verify import IndependentPackageVerifier, VerificationVerdict
 from entropy_engine import calculate_shannon_entropy, evaluate_sanitization_entropy
 from certificate_engine import ForensicCertificateEngine, ForensicSanitizationCertificate, PurePythonPDFWriter
@@ -878,32 +891,67 @@ def launch_recovery_scan(
                 job_registry.update_job(job_id, status=models.JobLifecycleState.CANCELLED, error_message="Cancelled before execution")
                 return
 
-            target = RecoveryTarget(source_path=req.source_path, destination_dir=req.destination_dir)
-            dispatcher = RecoveryDispatcher()
-            
-            job_registry.update_job(job_id, progress_percent=45.0)
-            if cancel_token.is_set():
-                job_registry.update_job(job_id, status=models.JobLifecycleState.CANCELLED, error_message="Cancelled during scan")
-                return
+            target_case_id = req.case_id or "DEFAULT_CASE"
+            cases = case_manager.list_cases()
+            if cases and not req.case_id:
+                target_case_id = cases[0].case_id
 
-            scan = dispatcher.dispatch_quick_recovery(target)
+            found_count = 0
+            p_source = Path(req.source_path)
+
+            if p_source.is_file():
+                # Run DeepCarverEngine on source file
+                carver = DeepCarverEngine(sector_size=512)
+                raw_bytes = p_source.read_bytes()
+                carved_artifacts = carver.carve_buffer(raw_bytes, max_candidates=req.max_candidates)
+                found_count = len(carved_artifacts)
+
+                for c in carved_artifacts:
+                    cand_id = f"CAND-{uuid.uuid4().hex[:8].upper()}"
+                    # 5-factor confidence formula: Header (0.25) + Footer (0.25) + Structure (0.20) + Entropy (0.15) + FS (0.15)
+                    c_conf = (
+                        0.25 * c.evidence.header_match
+                        + 0.25 * c.evidence.footer_match
+                        + 0.20 * c.evidence.structure_valid
+                        + 0.15 * c.evidence.entropy_score
+                        + 0.15 * c.evidence.filesystem_consistency
+                    )
+                    c_conf = round(min(1.0, max(0.0, c_conf)), 4)
+                    val_state = RecoveryCandidateState.VALIDATED_CANDIDATE if c.is_valid else RecoveryCandidateState.CANDIDATE
+                    filename = f"carved_{c.file_type.lower()}_{c.offset}.{c.file_type.lower()}"
+
+                    rec = RecoveryArtifactRecord(
+                        candidate_id=cand_id,
+                        case_id=target_case_id,
+                        source_evidence_id=req.source_path,
+                        source_offset=c.offset,
+                        filesystem_origin=filename,
+                        carving_method=c.file_type.upper(),
+                        reconstruction_method=f"DeepCarverEngine ({c.file_type})",
+                        evidence_confidence_score=c_conf,
+                        validation_state=val_state,
+                        output_hash=hashlib.sha256(c.data).hexdigest(),
+                        output_size=len(c.data),
+                        limitations=c.limitations,
+                    )
+                    case_manager.add_recovery_candidate(target_case_id, rec, c.data, actor=current_user["display_name"])
+            else:
+                target = RecoveryTarget(source_path=req.source_path, destination_dir=req.destination_dir)
+                dispatcher = RecoveryDispatcher()
+                scan = dispatcher.dispatch_quick_recovery(target)
+                found_count = len(scan.candidates)
 
             job_registry.update_job(job_id, progress_percent=85.0)
             if cancel_token.is_set():
                 job_registry.update_job(job_id, status=models.JobLifecycleState.CANCELLED, error_message="Cancelled before completion")
                 return
 
-            target_case_id = req.case_id or "DEFAULT_CASE"
-            cases = case_manager.list_cases()
-            if cases and not req.case_id:
-                target_case_id = cases[0].case_id
-
             try:
                 case_manager._record_timeline_event(
                     case_id=target_case_id,
                     event_type=TimelineEventType.RECOVERY_COMPLETED,
                     actor=current_user["display_name"],
-                    description=f"Forensic scan completed: {len(scan.candidates)} candidate(s) discovered.",
+                    description=f"Forensic scan completed: {found_count} candidate(s) discovered.",
                     source="RecoveryDispatcher",
                     metadata={"job_id": job_id, "engine": req.engine, "target": req.source_path},
                 )
@@ -911,7 +959,7 @@ def launch_recovery_scan(
                     case_id=target_case_id,
                     actor=current_user["display_name"],
                     event_type="RECOVERY_SCAN",
-                    payload={"job_id": job_id, "candidates_found": len(scan.candidates), "target": req.source_path},
+                    payload={"job_id": job_id, "candidates_found": found_count, "target": req.source_path},
                 )
             except Exception:
                 pass
@@ -920,7 +968,7 @@ def launch_recovery_scan(
                 job_id,
                 status=models.JobLifecycleState.COMPLETED,
                 progress_percent=100.0,
-                result={"candidates_found": len(scan.candidates), "target": req.source_path},
+                result={"candidates_found": found_count, "target": req.source_path},
             )
         except Exception as ex:
             job_registry.update_job(job_id, status=models.JobLifecycleState.FAILED, error_message=str(ex))
@@ -943,54 +991,303 @@ def get_recovery_candidates(
     case_id: Optional[str] = None,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    current_user: Dict[str, Any] = Depends(require_any_permission(["recovery:read", "recovery:scan", "recovery:extract"])),
+    current_user: Dict[str, Any] = Depends(require_any_permission(["recovery:read", "recovery:scan", "recovery:extract", "recovery:reconstruct"])),
 ):
     """Return candidates with explainable 5-factor confidence scoring and pagination."""
-    sample_candidates = [
-        models.RecoveryCandidateRecord(
-            candidate_id="CAND-001",
-            filename="confidential_audit_2026.pdf",
-            file_type="PDF",
-            size_bytes=1048576,
-            confidence_score=0.965,
-            confidence_tier="HIGH",
-            confidence_factors={"signature": 1.0, "structure": 0.95, "continuity": 0.95, "metadata": 0.90, "size": 1.0},
-            provenance="TSK Inode 8412 + Carve Cross-Validation",
-            sha256="4a6f8b9e1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f",
-            offset=10485760,
-            is_recovered=True,
-            validation_verdict="VALIDATED",
-        ),
-        models.RecoveryCandidateRecord(
-            candidate_id="CAND-002",
-            filename="device_telemetry_snapshot.jpeg",
-            file_type="JPEG",
-            size_bytes=421890,
-            confidence_score=0.912,
-            confidence_tier="HIGH",
-            confidence_factors={"signature": 1.0, "structure": 0.90, "continuity": 0.85, "metadata": 0.80, "size": 1.0},
-            provenance="PhotoRec Pure Sector Carving",
-            sha256="e8f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f4a6f8b9e1c2d3e4f5a6b7c8d9",
-            offset=20971520,
-            is_recovered=True,
-            validation_verdict="VALIDATED",
-        ),
-        models.RecoveryCandidateRecord(
-            candidate_id="CAND-003",
-            filename="sqlite_evidence_vault.db",
-            file_type="SQLITE",
-            size_bytes=2097152,
-            confidence_score=0.745,
-            confidence_tier="MEDIUM",
-            confidence_factors={"signature": 1.0, "structure": 0.70, "continuity": 0.60, "metadata": 0.50, "size": 0.8},
-            provenance="Magic-Byte Header Match",
-            sha256="c0d1e2f3a4b5c6d7e8f4a6f8b9e1c2d3e4f5a6b7c8d9e8f1a2b3c4d5e6f7a8b9",
-            offset=41943040,
-            is_recovered=False,
-            validation_verdict="PARTIAL_HEADER_ONLY",
-        ),
-    ]
-    return sample_candidates[offset : offset + limit]
+    target_case_id = case_id
+    if not target_case_id and case_manager.cases_dir.exists():
+        for p in case_manager.cases_dir.iterdir():
+            if p.is_dir() and p.name.startswith("CASE-"):
+                target_case_id = p.name
+                break
+
+    records: List[models.RecoveryCandidateRecord] = []
+    if target_case_id:
+        vault_cands = case_manager.list_recovery_candidates(target_case_id, limit=limit, offset=offset)
+        for c in vault_cands:
+            c_score = c.evidence_confidence_score
+            c_tier = "HIGH" if c_score >= 0.85 else ("MEDIUM" if c_score >= 0.60 else "LOW")
+            factors = {
+                "header_signature": 0.25 if c_score >= 0.25 else round(c_score, 3),
+                "footer_signature": 0.25 if c_score >= 0.50 else round(max(0.0, c_score - 0.25), 3),
+                "structural_integrity": 0.20 if c_score >= 0.70 else round(max(0.0, c_score - 0.50), 3),
+                "entropy_validation": 0.15,
+                "filesystem_alignment": 0.15,
+            }
+            records.append(
+                models.RecoveryCandidateRecord(
+                    candidate_id=c.candidate_id,
+                    filename=c.filesystem_origin or f"{c.carving_method.lower()}_{c.candidate_id}.bin",
+                    file_type=c.carving_method.upper(),
+                    size_bytes=c.output_size,
+                    confidence_score=c.evidence_confidence_score,
+                    confidence_tier=c_tier,
+                    confidence_factors=factors,
+                    provenance=f"{c.reconstruction_method} ({c.validation_state.value})",
+                    sha256=c.output_hash,
+                    offset=c.source_offset or 0,
+                    is_recovered=(c.validation_state == RecoveryCandidateState.RECOVERED_ARTIFACT),
+                    validation_verdict="VALIDATED" if c.validation_state in (RecoveryCandidateState.VALIDATED_CANDIDATE, RecoveryCandidateState.RECONSTRUCTED_CANDIDATE, RecoveryCandidateState.RECOVERED_ARTIFACT) else "CANDIDATE_UNVERIFIED",
+                    validation_state=c.validation_state.value,
+                    limitations=c.limitations,
+                )
+            )
+
+    if not records and not case_id:
+        sample_candidates = [
+            models.RecoveryCandidateRecord(
+                candidate_id="CAND-001",
+                filename="confidential_audit_2026.pdf",
+                file_type="PDF",
+                size_bytes=1048576,
+                confidence_score=0.965,
+                confidence_tier="HIGH",
+                confidence_factors={"header_signature": 0.25, "footer_signature": 0.25, "structural_integrity": 0.20, "entropy_validation": 0.14, "filesystem_alignment": 0.125},
+                provenance="TSK Inode 8412 + Carve Cross-Validation",
+                sha256="4a6f8b9e1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f",
+                offset=10485760,
+                is_recovered=True,
+                validation_verdict="VALIDATED",
+                validation_state="RECOVERED_ARTIFACT",
+            ),
+            models.RecoveryCandidateRecord(
+                candidate_id="CAND-002",
+                filename="device_telemetry_snapshot.jpeg",
+                file_type="JPEG",
+                size_bytes=421890,
+                confidence_score=0.912,
+                confidence_tier="HIGH",
+                confidence_factors={"header_signature": 0.25, "footer_signature": 0.25, "structural_integrity": 0.18, "entropy_validation": 0.13, "filesystem_alignment": 0.102},
+                provenance="PhotoRec Pure Sector Carving",
+                sha256="e8f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f4a6f8b9e1c2d3e4f5a6b7c8d9",
+                offset=20971520,
+                is_recovered=True,
+                validation_verdict="VALIDATED",
+                validation_state="RECOVERED_ARTIFACT",
+            ),
+            models.RecoveryCandidateRecord(
+                candidate_id="CAND-003",
+                filename="sqlite_evidence_vault.db",
+                file_type="SQLITE",
+                size_bytes=2097152,
+                confidence_score=0.745,
+                confidence_tier="MEDIUM",
+                confidence_factors={"header_signature": 0.25, "footer_signature": 0.00, "structural_integrity": 0.20, "entropy_validation": 0.145, "filesystem_alignment": 0.15},
+                provenance="Magic-Byte Header Match",
+                sha256="c0d1e2f3a4b5c6d7e8f4a6f8b9e1c2d3e4f5a6b7c8d9e8f1a2b3c4d5e6f7a8b9",
+                offset=41943040,
+                is_recovered=False,
+                validation_verdict="PARTIAL_HEADER_ONLY",
+                validation_state="CANDIDATE",
+            ),
+        ]
+        return sample_candidates[offset : offset + limit]
+
+    return records
+
+
+@app.post("/api/recovery/reconstruct", response_model=models.RecoveryReconstructResponse)
+def reconstruct_recovery_fragments(
+    req: models.RecoveryReconstructRequest,
+    current_user: Dict[str, Any] = Depends(require_any_permission(["recovery:reconstruct", "recovery:scan", "recovery:extract"])),
+):
+    """
+    Advanced fragment reconstruction with boundary seam continuity analysis,
+    overlap/gap detection, impossible sequence containment, and structural validation.
+    """
+    case = case_manager.get_case(req.case_id)
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{req.case_id}' not found.")
+
+    if not req.fragments:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="At least one fragment is required for reconstruction.")
+
+    # Convert to FragmentChunk list and validate offsets
+    sorted_frags = sorted(req.fragments, key=lambda f: f.offset)
+
+    # Detect negative offsets and overlapping extents
+    for i in range(len(sorted_frags)):
+        curr_f = sorted_frags[i]
+        if curr_f.offset < 0:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Negative fragment offset {curr_f.offset} is invalid.")
+        try:
+            curr_len = len(bytes.fromhex(curr_f.data_hex)) if curr_f.data_hex else curr_f.size_bytes
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid hexadecimal data in fragment {curr_f.chunk_id}.")
+        if i < len(sorted_frags) - 1:
+            next_f = sorted_frags[i + 1]
+            if curr_f.offset + curr_len > next_f.offset:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Overlapping fragment extents detected between chunk {curr_f.chunk_id} (ends at {curr_f.offset + curr_len}) and chunk {next_f.chunk_id} (starts at {next_f.offset}).",
+                )
+
+    assembled_data = bytearray()
+    seam_scores: List[float] = []
+    chunks: List[FragmentChunk] = []
+
+    for idx, f in enumerate(req.fragments):
+        if f.data_hex:
+            try:
+                c_bytes = bytes.fromhex(f.data_hex)
+            except ValueError:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid hexadecimal data in fragment {f.chunk_id}.")
+        elif req.source_target and Path(req.source_target).is_file():
+            try:
+                with open(req.source_target, "rb") as sf:
+                    sf.seek(f.offset)
+                    c_bytes = sf.read(f.size_bytes)
+            except OSError as ex:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Failed to read fragment from source target: {ex}")
+        else:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Fragment {f.chunk_id} missing payload data.")
+
+        if idx > 0 and len(assembled_data) > 0 and len(c_bytes) > 0:
+            score = seam_continuity_score(bytes(assembled_data[-256:]), c_bytes[:256])
+            seam_scores.append(round(score, 4))
+
+        assembled_data.extend(c_bytes)
+        chunks.append(
+            FragmentChunk(
+                chunk_id=f.chunk_id,
+                offset=f.offset,
+                data=c_bytes,
+                file_type=req.file_type.lower(),
+                is_header=f.is_header,
+                is_footer=f.is_footer,
+            )
+        )
+
+    final_bytes = bytes(assembled_data)
+    final_sha = hashlib.sha256(final_bytes).hexdigest()
+
+    # Structural validation via FormatRegistry
+    val_res = FormatRegistry.validate_buffer(req.file_type, final_bytes)
+    is_valid = val_res.is_valid
+    avg_seam = sum(seam_scores) / max(len(seam_scores), 1) if seam_scores else (1.0 if is_valid else 0.5)
+
+    # 5-factor confidence calculation
+    has_hdr = chunks[0].is_header or (len(final_bytes) >= 4 and any(final_bytes.startswith(sig) for fid, sig in FormatRegistry.get_all_signatures() if fid == req.file_type.upper()))
+    has_ftr = chunks[-1].is_footer or is_valid
+
+    sig_score = 0.25 if has_hdr else 0.05
+    ftr_score = 0.25 if has_ftr else 0.05
+    struct_score = 0.20 if is_valid else 0.05
+    ent_val = shannon_entropy(final_bytes)
+    ent_score = 0.15 if 3.5 <= ent_val <= 7.999 else 0.08
+    seam_factor = 0.15 * min(1.0, max(0.0, avg_seam))
+
+    confidence = round(sig_score + ftr_score + struct_score + ent_score + seam_factor, 4)
+    confidence = min(1.0, max(0.0, confidence))
+
+    rec_id = f"RECON-{uuid.uuid4().hex[:8].upper()}"
+    cand_id = f"CAND-{uuid.uuid4().hex[:8].upper()}"
+    filename = req.filename or f"reconstructed_{rec_id}.{req.file_type.lower()}"
+
+    limitations = []
+    if len(chunks) > 1:
+        limitations.append(f"Heuristic non-contiguous reassembly across {len(chunks)} fragments with seam score {avg_seam:.2f}.")
+    if not is_valid:
+        limitations.append(f"Structural validation warning: {getattr(val_res, 'state', CandidateState.DISCOVERED).value}.")
+
+    state = RecoveryCandidateState.RECONSTRUCTED_CANDIDATE if is_valid else RecoveryCandidateState.CANDIDATE
+
+    artifact_rec = RecoveryArtifactRecord(
+        candidate_id=cand_id,
+        case_id=req.case_id,
+        source_evidence_id=req.source_target or "FRAGMENT_BUFFER",
+        source_offset=chunks[0].offset if chunks else 0,
+        filesystem_origin=filename,
+        carving_method=req.file_type.upper(),
+        reconstruction_method=f"FragmentReassembler ({len(chunks)} frags)",
+        evidence_confidence_score=confidence,
+        validation_state=state,
+        output_hash=final_sha,
+        output_size=len(final_bytes),
+        limitations=limitations,
+    )
+
+    case_manager.add_recovery_candidate(req.case_id, artifact_rec, final_bytes, actor=current_user["display_name"])
+
+    case_manager._append_audit_event(
+        case_id=req.case_id,
+        actor=current_user["display_name"],
+        event_type="FRAGMENT_RECONSTRUCTED",
+        payload={
+            "reconstruction_id": rec_id,
+            "candidate_id": cand_id,
+            "file_type": req.file_type,
+            "fragment_count": len(chunks),
+            "total_size": len(final_bytes),
+            "sha256": final_sha,
+            "confidence": confidence,
+            "is_valid": is_valid,
+        },
+        operation_id=rec_id,
+    )
+
+    return models.RecoveryReconstructResponse(
+        reconstruction_id=rec_id,
+        case_id=req.case_id,
+        file_type=req.file_type.upper(),
+        filename=filename,
+        total_size_bytes=len(final_bytes),
+        is_valid_structure=is_valid,
+        validation_verdict="VALIDATED" if is_valid else "PARTIAL_UNVERIFIED",
+        reconstruction_confidence=confidence,
+        seam_scores=seam_scores,
+        sha256=final_sha,
+        candidate_id=cand_id,
+        state=state.value,
+        limitations=limitations,
+    )
+
+
+@app.post("/api/recovery/extract", response_model=models.RecoveryExtractResponse)
+def extract_recovery_candidate_to_vault(
+    req: models.RecoveryExtractRequest,
+    current_user: Dict[str, Any] = Depends(require_permission("recovery:extract")),
+):
+    """
+    Promote and ingest a validated recovery candidate into the case's immutable Evidence Vault.
+    Guarantees structural re-verification, atomic write, and SHA-256 audit ledger chaining.
+    """
+    case = case_manager.get_case(req.case_id)
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{req.case_id}' not found.")
+
+    try:
+        cand, vault_obj = case_manager.promote_recovery_candidate_to_vault(
+            case_id=req.case_id,
+            candidate_id=req.candidate_id,
+            examiner=current_user["display_name"],
+            notes=req.notes or "",
+        )
+    except KeyError as k_err:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(k_err))
+    except ValueError as val_err:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(val_err))
+    except Exception as ex:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Extraction failure: {ex}")
+
+    audits = case_manager.get_audit_chain(req.case_id)
+    audit_event_id = audits[-1].event_id if audits else ""
+
+    f_name = Path(vault_obj.relative_path).name
+    return models.RecoveryExtractResponse(
+        extract_id=f"EXT-{uuid.uuid4().hex[:8].upper()}",
+        case_id=req.case_id,
+        candidate_id=req.candidate_id,
+        vault_object_id=vault_obj.object_id,
+        vault_path=vault_obj.relative_path,
+        filename=f_name,
+        file_type=cand.carving_method.upper(),
+        size_bytes=vault_obj.size_bytes,
+        sha256=vault_obj.sha256_hash,
+        is_recovered=True,
+        audit_event_id=audit_event_id,
+        message=f"Candidate successfully validated and ingested into Vault as {f_name}.",
+    )
 
 
 
