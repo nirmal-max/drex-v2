@@ -26,7 +26,7 @@ This document serves as an exhaustive forensic repository of all errors, runtime
 - **Forensic Reality**: ISO/IEC 27037 ("Guidelines for identification, collection, acquisition and preservation of digital evidence") specifies procedural and organizational standards for digital forensic practitioners and labs. A software product or utility *cannot* legally or technically claim to be "ISO 27037 Certified" unless independently qualified and audited by an accredited conformity assessment body.
 - **Remediation**: The banner was updated in `certificate_engine.py` to:
   `"NIST SP 800-88 Rev. 2 Aligned Evidence Record & Cryptographic Attestation"`.
-  All claims are strictly grounded in verifiable cryptographic proofs (SHA-256 Merkle chain verification).
+  All claims are strictly grounded in verifiable cryptographic proofs (SHA-256 Hash-Linked Audit Chain verification).
 
 ### Issue 1.2: "Merkle Tree" vs Hash-Chain Nomenclature
 - **Discrepancy**: Documentation and code comments frequently conflated a sequential hash-chain (`H_n = SHA256(H_{n-1} || Event)`) with a "Merkle Tree".

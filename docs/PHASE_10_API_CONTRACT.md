@@ -18,7 +18,7 @@
 | `/api/sanitization/execute` | POST | Execute sanitization with safety phrase | Operator, Admin |
 | `/api/sanitization/sector-grid` | GET | 64-Sector storage visualizer telemetry | All Personas |
 | `/api/audit/ledger` | GET | Cryptographic SHA-256 audit ledger | Auditor, Reviewer, Admin |
-| `/api/audit/verify` | POST | Verify Merkle/hash-chain integrity | Auditor, Reviewer, Admin |
+| `/api/audit/verify` | POST | Verify SHA-256 hash-chain integrity | Auditor, Reviewer, Admin |
 | `/api/verification/verify-package`| POST | Execute drex_verify.py Schema 2.0 | All Personas |
 | `/api/methods/registry` | GET | Authoritative 25-method matrix | All Personas |
 | `/api/demo/flow` | POST | Deterministic Judge Proof Loop (< 60s) | Judge, All Personas |

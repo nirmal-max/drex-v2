@@ -661,7 +661,7 @@ def get_audit_ledger(case_id: Optional[str] = None, current_user: Dict[str, Any]
 
 @app.post("/api/audit/verify")
 def verify_audit_integrity(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(require_permission("audit:verify"))):
-    """Validate full SHA-256 Merkle / hash-chain integrity of the audit log."""
+    """Validate full SHA-256 hash-linked audit chain integrity of the audit log."""
     target_case_id = case_id
     if not target_case_id:
         cases = case_manager.list_cases()

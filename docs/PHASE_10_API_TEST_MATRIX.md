@@ -12,7 +12,7 @@
 | GET | /api/methods/registry | None (Public) | Public Inspection | None | 200 OK | 500 Internal Error | get_method_registry | Authoritative 25-method matrix | **PASS** |
 | GET | /api/recovery/candidates | Bearer JWT | recovery:* | None | 200 OK | 401 / 403 | get_recovery_candidates | 5-factor explainable scoring | **PASS** |
 | GET | /api/sanitization/sector-grid | Bearer JWT | residue/sanitization | None | 200 OK | 401 / 403 | get_sector_block_grid | 64-sector block entropy visualizer | **PASS** |
-| POST | /api/audit/verify | Bearer JWT | audit:verify | None | 200 OK | 401 / 403 | verify_case_audit_chain | Merkle chain tamper audit | **PASS** |
+| POST | /api/audit/verify | Bearer JWT | audit:verify | None | 200 OK | 401 / 403 | verify_case_audit_chain | SHA-256 hash-linked audit chain tamper audit | **PASS** |
 | POST | /api/auth/login | None (Public) | ANY | LoginRequest | 200 OK | 401 Unauthorized | rbac.create_access_token | Synthetic password auth | **PASS** |
 | POST | /api/auth/switch-persona | None (Public Helper) | ANY | DemoPersonaSwitchRequest | 200 OK | 400 / 422 | rbac.create_access_token | Switch to all 6 roles | **PASS** |
 | POST | /api/cases | Bearer JWT | cases:write | ForensicCaseCreate | 200 OK | 401 / 403 / 422 | case_manager.create_case | Create isolated case container | **PASS** |

@@ -6,7 +6,7 @@ Comprehensive test suite covering:
 - Evidence Sources (registration, unknown hardware handling, hashing)
 - Streaming Cryptographic Hasher (SHA-256/SHA-512, chunked memory bounds)
 - Forensic Timeline (chronological events, integrity verification)
-- Hash-Chained Audit Ledger (Merkle hash chaining, independent audit verifier)
+- Hash-Chained Audit Ledger (SHA-256 hash chaining, independent audit verifier)
 - Tamper Detection (payload mutations, altered prev_hash, broken sequence, deleted/inserted events)
 - Chain of Custody (intake, transfer, access, sealing, immutable history)
 - Evidence Vault (categorized object isolation: SOURCE, DERIVED, RECOVERED, REPORT, CERTIFICATE, AUDIT)
