@@ -158,3 +158,68 @@ def evaluate_sanitization_entropy(
         verdict=verdict,
         evidence_notes=notes,
     )
+
+
+def generate_entropy_heatmap(
+    data: bytes,
+    window_size: int = 4096,
+    step_size: int = 4096,
+) -> Dict[str, Any]:
+    """Generate a sliding-window Shannon entropy heatmap array and summary distribution.
+    
+    Returns:
+        dict containing:
+        - "windows": list of dicts with offset, size, and entropy value
+        - "mean_entropy": average entropy across all windows
+        - "histogram": bucketed distribution [0-1, 1-2, ..., 7-8]
+        - "high_entropy_ratio": fraction of windows with H >= 7.90
+        - "uniform_ratio": fraction of windows with H < 0.05
+    """
+    if not data or window_size <= 0:
+        return {
+            "windows": [],
+            "mean_entropy": 0.0,
+            "histogram": [0] * 8,
+            "high_entropy_ratio": 0.0,
+            "uniform_ratio": 0.0,
+        }
+
+    windows: List[Dict[str, Any]] = []
+    histogram = [0] * 8
+    total_entropy = 0.0
+    num_windows = 0
+    high_count = 0
+    uniform_count = 0
+
+    offset = 0
+    data_len = len(data)
+    while offset < data_len:
+        chunk = data[offset:offset + window_size]
+        ent = calculate_shannon_entropy(chunk)
+        windows.append({
+            "offset": offset,
+            "size": len(chunk),
+            "entropy": ent,
+        })
+        total_entropy += ent
+        num_windows += 1
+
+        bucket = min(7, int(ent))
+        histogram[bucket] += 1
+
+        if ent >= 7.90:
+            high_count += 1
+        if ent < 0.05:
+            uniform_count += 1
+
+        offset += step_size
+
+    mean_ent = round(total_entropy / num_windows, 4) if num_windows > 0 else 0.0
+    return {
+        "windows": windows,
+        "mean_entropy": mean_ent,
+        "histogram": histogram,
+        "high_entropy_ratio": round(high_count / num_windows, 4) if num_windows > 0 else 0.0,
+        "uniform_ratio": round(uniform_count / num_windows, 4) if num_windows > 0 else 0.0,
+    }
+

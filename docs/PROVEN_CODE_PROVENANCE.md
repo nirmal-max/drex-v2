@@ -276,4 +276,96 @@
 - **Dependencies:** None (Pure Python standard library).
 - **Validation Evidence:** `tests/test_phase5_raid_reconstruction.py`.
 
+---
+
+### PROV-P6-001: BleachBit Free-Space & Slack Wiping Algorithmic Reference
+- **Source Project:** BleachBit
+- **Repository URL:** `https://github.com/bleachbit/bleachbit`
+- **Source Version:** v6.0.3 (`commit 7b1e4a`, local checkout `repo/bleachbit-master`)
+- **Original License:** GNU General Public License v3 or later (GPL-3.0-or-later)
+- **License Status:** COMPATIBLE / NON-BLOCKING (Algorithmic reference only; zero GPL code bundled or copied)
+- **DREX Destination File:** `file_sanitizer.py`
+- **DREX Destination Symbol:** `FreeSpaceSanitizer`, `SlackSanitizer`
+- **Adaptation Type:** CLEAN_ROOM_ALGORITHMIC_REFERENCE
+- **Reason for Reuse:** Standard bounded chunk file allocation and filesystem free space wiping strategies.
+- **DREX Clean-Room Implementation:** Pure standard-library Python implementation with 512 MB safety headroom guard and pre/post payload SHA-256 preservation.
+- **Dependencies:** None (Pure Python standard library).
+- **Validation Evidence:** `tests/test_file_sanitizer.py`, `tests/test_freespace_sanitizer.py`.
+
+---
+
+### PROV-P6-002: The Sleuth Kit (TSK) Native Filesystem Recovery & MFT Parsing
+- **Source Project:** The Sleuth Kit
+- **Repository URL:** `https://github.com/sleuthkit/sleuthkit`
+- **Source Version:** v4.15.0 (`develop-4.1x`, local checkout `repo/sleuthkit-develop-4.1x`)
+- **Original License:** CPL-1.0 / IPL-1.0 / Apache-2.0 / BSD / MIT (`licenses/`)
+- **License Status:** COMPATIBLE / NON-BLOCKING (External CLI process invocation + clean-room Python structures)
+- **DREX Destination Files:** `backend_adapters.py`, `mft_sanitizer.py`
+- **DREX Destination Symbols:** `MFTSanitizer`, `build_fls_command`, `parse_fls_output`, `build_icat_command`
+- **Adaptation Type:** EXTERNAL_PROCESS_BACKEND & CLEAN_ROOM_SPECIFICATION
+- **Reason for Reuse:** Standard forensic filesystem parsing, deleted inode extraction (`fls`, `icat`), and NTFS MFT record structure definitions.
+- **Dependencies:** Bundled native Windows binaries in `native_bin/`.
+- **Validation Evidence:** `tests/test_backend_adapters.py`, `tests/test_mft_sanitizer.py`.
+
+---
+
+### PROV-P6-003: libfsntfs On-Disk Structure Specification Reference
+- **Source Project:** libfsntfs
+- **Repository URL:** `https://github.com/libyal/libfsntfs`
+- **Source Version:** v20260827 (local checkout `repo/libfsntfs-main`)
+- **Original License:** GNU Lesser General Public License v3 or later (LGPL-3.0-or-later)
+- **License Status:** COMPATIBLE / NON-BLOCKING (On-disk structure specification reference only; zero binary linking)
+- **DREX Destination File:** `mft_sanitizer.py`
+- **DREX Destination Symbol:** `MFTSanitizer.parse_record_header`
+- **Adaptation Type:** SPECIFICATION_REFERENCE_ONLY
+- **Reason for Reuse:** NTFS MFT 1024-byte record header and fixup array offset definitions.
+- **Dependencies:** None (Pure Python standard library).
+- **Validation Evidence:** `tests/test_mft_sanitizer.py`.
+
+---
+
+### PROV-P6-004: Eraser Sanitization Overwrite Pattern Reference
+- **Source Project:** Eraser
+- **Repository URL:** `https://sourceforge.net/projects/eraser/`
+- **Source Version:** v6.2.0.2998 (local checkout `repo/eraser-master`)
+- **Original License:** GNU General Public License v3 or later (GPL-3.0-or-later)
+- **License Status:** COMPATIBLE / NON-BLOCKING (Pattern definition table reference only; zero GPL code copied)
+- **DREX Destination File:** `file_sanitizer.py`
+- **DREX Destination Symbol:** `GUTMANN_PATTERNS`, `SanitizationStandard`
+- **Adaptation Type:** SPECIFICATION_REFERENCE_ONLY
+- **Reason for Reuse:** Canonical 35-pass Gutmann pattern definitions and DoD 5220.22-M 7-pass sequence.
+- **Dependencies:** None (Pure Python standard library).
+- **Validation Evidence:** `tests/test_file_sanitizer.py`.
+
+---
+
+### PROV-P6-005: DriveWipe Native Pass-Through IOCTL Reference
+- **Source Project:** DriveWipe
+- **Repository URL:** `https://github.com/KodyDennon/DriveWipe`
+- **Source Version:** v2.0.5 (Rust 2024, local checkout `repo/DriveWipe-main`)
+- **Original License:** Permissive Open Source (`LICENSE.md`)
+- **License Status:** COMPATIBLE / NON-BLOCKING (Permissive open source)
+- **DREX Destination File:** `hardware_storage.py`
+- **DREX Destination Symbol:** `PhysicalDriveInterface`, `send_ata_passthru`, `send_nvme_sanitize`
+- **Adaptation Type:** REUSE_WITH_ADAPTATION
+- **Reason for Reuse:** Direct Windows DeviceIoControl IOCTL structures for ATA/NVMe pass-through and frozen security state detection.
+- **Dependencies:** `ctypes` (standard library on Windows).
+- **Validation Evidence:** `tests/hardware_qualification/test_hardware_qualification_harness.py`.
+
+---
+
+### PROV-P6-006: NIST SP 800-88 Rev. 1 & Appendix C Forensic Certification Standard
+- **Source Project:** NIST Special Publication 800-88 Rev. 1 (Guidelines for Media Sanitization)
+- **Source Authority:** National Institute of Standards and Technology (US Department of Commerce)
+- **Publication Date:** December 2014
+- **License:** US Public Domain (Government Work)
+- **License Status:** COMPATIBLE / NON-BLOCKING (Direct government standard)
+- **DREX Destination File:** `certificate_engine.py`
+- **DREX Destination Symbol:** `ForensicCertificateEngine`, `ForensicSanitizationCertificate`
+- **Adaptation Type:** DIRECT_STANDARD_IMPLEMENTATION
+- **Reason for Reuse:** Industry standard for Clear/Purge definitions and Appendix C Certificate of Sanitization schema requirements.
+- **Dependencies:** None (Pure Python standard library).
+- **Validation Evidence:** `tests/test_forensic_certificate.py`.
+
+
 
