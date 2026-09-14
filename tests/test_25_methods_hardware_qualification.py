@@ -36,14 +36,15 @@ def test_25_methods_matrix_completeness():
 
 
 def test_nvme_fixture_qualification():
-    """Verify NVMe fixture qualifies Method 05 (NVMe Secure Erase)."""
+    """Verify NVMe fixture enforces conservative qualification for Method 05 (NVMe Secure Erase: UNSUPPORTED/HARDWARE_REQUIRED)."""
     sim = {"disk_number": 1, "bus_type": "NVME", "is_ssd": True}
     snap = DeviceIntelligenceEngine.create_snapshot(r"\\.\PhysicalDrive1", simulated_descriptor=sim)
     matrix = Qualification25MethodEngine.evaluate_25_methods(snap)
 
     m05 = matrix[5]
-    assert m05.qualification_status == QualificationStatus.AVAILABLE
-    assert "NVME_ADMIN_COMMAND_SUPPORT" in m05.detected_capabilities
+    assert m05.qualification_status == QualificationStatus.UNSUPPORTED
+    assert "HARDWARE_REQUIRED" in m05.blocking_reasons
+    assert m05.truth_model.software_qualification == "UNSUPPORTED"
 
     # M04 (ATA Secure Erase) must be NOT_APPLICABLE on NVMe
     m04 = matrix[4]
@@ -52,14 +53,13 @@ def test_nvme_fixture_qualification():
 
 
 def test_usb_flash_fixture_qualification():
-    """Verify USB flash fixture blocks M03, M04, M05 with USB_BRIDGE_LIMITATION while allowing M01, M07, M17-M25."""
+    """Verify USB flash fixture blocks M04, M05 with USB_BRIDGE_LIMITATION while allowing M01, M07, M17-M20, M25."""
     sim = {"disk_number": 3, "bus_type": "USB", "is_usb_bridge": True, "removable": True}
     snap = DeviceIntelligenceEngine.create_snapshot(r"\\.\PhysicalDrive3", simulated_descriptor=sim)
     matrix = Qualification25MethodEngine.evaluate_25_methods(snap)
 
-    # Hardware methods blocked on USB
-    assert matrix[3].qualification_status == QualificationStatus.BLOCKED
-    assert "USB_BRIDGE_LIMITATION" in matrix[3].blocking_reasons
+    # Hardware methods blocked/unsupported on USB
+    assert matrix[3].qualification_status == QualificationStatus.UNSUPPORTED
     assert matrix[4].qualification_status == QualificationStatus.BLOCKED
     assert "USB_BRIDGE_LIMITATION" in matrix[4].blocking_reasons
     assert matrix[5].qualification_status == QualificationStatus.BLOCKED
@@ -69,10 +69,16 @@ def test_usb_flash_fixture_qualification():
     assert matrix[1].qualification_status == QualificationStatus.AVAILABLE
     assert matrix[7].qualification_status == QualificationStatus.AVAILABLE
 
-    # Recovery methods (M17-M25) available on USB
-    for r_id in range(17, 26):
+    # Standard recovery methods available
+    for r_id in (17, 18, 19, 20, 25):
         assert matrix[r_id].qualification_status == QualificationStatus.AVAILABLE
         assert matrix[r_id].applicability == MethodApplicability.APPLICABLE
+
+    # Partial / unsupported recovery methods
+    assert matrix[21].qualification_status == QualificationStatus.PARTIAL
+    assert matrix[22].qualification_status == QualificationStatus.PARTIAL
+    assert matrix[23].qualification_status == QualificationStatus.UNSUPPORTED
+    assert matrix[24].qualification_status == QualificationStatus.BACKEND_UNAVAILABLE
 
 
 def test_system_disk_blocks_destructive_allows_recovery():
@@ -86,6 +92,12 @@ def test_system_disk_blocks_destructive_allows_recovery():
         assert matrix[d_id].qualification_status == QualificationStatus.BLOCKED
         assert "SYSTEM_DISK_BLOCKED" in matrix[d_id].blocking_reasons
 
-    # Recovery methods 17-25 remain available
-    for r_id in range(17, 26):
+    # Standard recovery methods 17-20, 25 remain available
+    for r_id in (17, 18, 19, 20, 25):
         assert matrix[r_id].qualification_status == QualificationStatus.AVAILABLE
+
+    # Partial / unsupported recovery methods preserve conservative status
+    assert matrix[21].qualification_status == QualificationStatus.PARTIAL
+    assert matrix[22].qualification_status == QualificationStatus.PARTIAL
+    assert matrix[23].qualification_status == QualificationStatus.UNSUPPORTED
+    assert matrix[24].qualification_status == QualificationStatus.BACKEND_UNAVAILABLE

@@ -153,6 +153,8 @@ class MethodApplicability(enum.Enum):
     APPLICABLE_WITH_LIMITATIONS = "APPLICABLE_WITH_LIMITATIONS"
     NOT_APPLICABLE = "NOT_APPLICABLE"
     UNSUPPORTED = "UNSUPPORTED"
+    PARTIAL = "PARTIAL"
+    BACKEND_UNAVAILABLE = "BACKEND_UNAVAILABLE"
 
 
 class QualificationStatus(enum.Enum):
@@ -160,6 +162,8 @@ class QualificationStatus(enum.Enum):
     LIMITED = "LIMITED"
     BLOCKED = "BLOCKED"
     UNSUPPORTED = "UNSUPPORTED"
+    PARTIAL = "PARTIAL"
+    BACKEND_UNAVAILABLE = "BACKEND_UNAVAILABLE"
 
 
 class StorageLimitation(enum.Enum):
@@ -1186,16 +1190,16 @@ class Qualification25MethodEngine:
 
             elif m_id == 3:  # Device-Native Sanitize
                 req_caps.append("NATIVE_SANITIZE_PROTOCOL")
+                miss_caps.append("NATIVE_SANITIZE_PROTOCOL")
                 if is_usb:
-                    miss_caps.append("NATIVE_SANITIZE_PROTOCOL")
                     blocking.append("USB_BRIDGE_LIMITATION")
                     lims.append(StorageLimitation.USB_BRIDGE_LIMITATION.value)
-                    status = QualificationStatus.BLOCKED
-                    app = MethodApplicability.UNSUPPORTED
-                elif t_bus == TransportBus.NVME:
-                    det_caps.append("NATIVE_SANITIZE_PROTOCOL")
-                else:
-                    det_caps.append("NATIVE_SANITIZE_PROTOCOL")
+                blocking.append("HARDWARE_REQUIRED")
+                lims.append("Requires physical controller native sanitize support without USB bridge filtering.")
+                status = QualificationStatus.UNSUPPORTED
+                app = MethodApplicability.UNSUPPORTED
+                exec_state = "HARDWARE_REQUIRED"
+                soft_qual = "UNSUPPORTED"
 
             elif m_id == 4:  # ATA Secure Erase
                 req_caps.append("ATA_SECURITY_FEATURE_SET")
@@ -1204,20 +1208,23 @@ class Qualification25MethodEngine:
                     blocking.append("USB_BRIDGE_LIMITATION")
                     status = QualificationStatus.BLOCKED
                     app = MethodApplicability.UNSUPPORTED
+                    exec_state = "BLOCKED"
+                    soft_qual = "UNSUPPORTED"
                 elif t_bus not in (TransportBus.SATA, TransportBus.ATA):
                     miss_caps.append("ATA_SECURITY_FEATURE_SET")
                     blocking.append("UNSUPPORTED_BUS")
                     status = QualificationStatus.UNSUPPORTED
                     app = MethodApplicability.NOT_APPLICABLE
+                    exec_state = "UNSUPPORTED_BUS"
+                    soft_qual = "UNSUPPORTED"
                 else:
-                    if ata_evidence and ata_evidence.security_frozen:
-                        blocking.append("FROZEN")
-                        status = QualificationStatus.BLOCKED
-                    elif ata_evidence and ata_evidence.security_locked:
-                        blocking.append("LOCKED")
-                        status = QualificationStatus.BLOCKED
-                    else:
-                        det_caps.append("ATA_SECURITY_FEATURE_SET")
+                    miss_caps.append("ATA_SECURITY_FEATURE_SET")
+                    blocking.append("HARDWARE_REQUIRED")
+                    lims.append("Requires physical direct SATA bus attachment and ATA controller pass-through.")
+                    status = QualificationStatus.UNSUPPORTED
+                    app = MethodApplicability.UNSUPPORTED
+                    exec_state = "HARDWARE_REQUIRED"
+                    soft_qual = "UNSUPPORTED"
 
             elif m_id == 5:  # NVMe Secure Erase
                 req_caps.append("NVME_ADMIN_COMMAND_SUPPORT")
@@ -1226,14 +1233,23 @@ class Qualification25MethodEngine:
                     blocking.append("USB_BRIDGE_LIMITATION")
                     status = QualificationStatus.BLOCKED
                     app = MethodApplicability.UNSUPPORTED
+                    exec_state = "BLOCKED"
+                    soft_qual = "UNSUPPORTED"
                 elif t_bus != TransportBus.NVME:
                     miss_caps.append("NVME_ADMIN_COMMAND_SUPPORT")
                     blocking.append("UNSUPPORTED_BUS")
                     status = QualificationStatus.UNSUPPORTED
                     app = MethodApplicability.NOT_APPLICABLE
+                    exec_state = "UNSUPPORTED_BUS"
+                    soft_qual = "UNSUPPORTED"
                 else:
-                    det_caps.append("NVME_ADMIN_COMMAND_SUPPORT")
-                    verif_state = "NVMe_CQE_READBACK"
+                    miss_caps.append("NVME_ADMIN_COMMAND_SUPPORT")
+                    blocking.append("HARDWARE_REQUIRED")
+                    lims.append("Requires physical NVMe PCIe controller and Admin queue execution.")
+                    status = QualificationStatus.UNSUPPORTED
+                    app = MethodApplicability.UNSUPPORTED
+                    exec_state = "HARDWARE_REQUIRED"
+                    soft_qual = "UNSUPPORTED"
 
             elif m_id == 6:  # IEEE 2883 Purge
                 req_caps.append("ENTERPRISE_STORAGE_CLASSIFICATION")
@@ -1301,13 +1317,53 @@ class Qualification25MethodEngine:
                 det_caps.append("TEMP_DIRECTORY_ACCESS")
                 verif_state = "FILE_COUNT_AND_UNLINK"
 
-            elif 17 <= m_id <= 25:  # Forensic Recovery Methods (Strictly Read-Only)
+            elif m_id in (17, 18, 19, 20, 25):  # Standard Forensic Recovery Methods (Strictly Read-Only)
                 req_caps.append("GENERIC_READ_ACCESS")
                 det_caps.append("GENERIC_READ_ACCESS")
                 verif_state = "READ_ONLY_INTEGRITY_VERIFIED"
                 status = QualificationStatus.AVAILABLE
                 app = MethodApplicability.APPLICABLE
-                # Recovery is NEVER blocked by system disk (read-only triage is allowed)
+                soft_qual = "SOFTWARE-QUALIFIED"
+
+            elif m_id == 21:  # Deep Recovery (Raw Carver)
+                req_caps.append("RAW_DISK_CARVING")
+                det_caps.append("RAW_DISK_CARVING")
+                lims.append("Raw carving operates without filesystem directory tree reconstruction.")
+                verif_state = "READ_ONLY_INTEGRITY_VERIFIED"
+                status = QualificationStatus.PARTIAL
+                app = MethodApplicability.APPLICABLE_WITH_LIMITATIONS
+                soft_qual = "PARTIAL"
+
+            elif m_id == 22:  # Fragment Recovery (Heuristic Assembly)
+                req_caps.append("FRAGMENT_RECONSTRUCTION")
+                det_caps.append("FRAGMENT_RECONSTRUCTION")
+                lims.append("Heuristic fragment reassembly operates on bi-fragment structures only.")
+                verif_state = "READ_ONLY_INTEGRITY_VERIFIED"
+                status = QualificationStatus.PARTIAL
+                app = MethodApplicability.APPLICABLE_WITH_LIMITATIONS
+                soft_qual = "PARTIAL"
+
+            elif m_id == 23:  # RAID / Storage Recovery
+                req_caps.append("MULTI_DISK_ARRAY_PARSER")
+                miss_caps.append("MULTI_DISK_ARRAY_PARSER")
+                blocking.append("HARDWARE_REQUIRED")
+                lims.append("Multi-disk RAID array parsing requires physical array topology evidence; single disk only in current scope.")
+                verif_state = "READ_ONLY_INTEGRITY_VERIFIED"
+                status = QualificationStatus.UNSUPPORTED
+                app = MethodApplicability.UNSUPPORTED
+                exec_state = "HARDWARE_REQUIRED"
+                soft_qual = "UNSUPPORTED"
+
+            elif m_id == 24:  # Damaged Media Recovery
+                req_caps.append("LOW_LEVEL_SECTOR_MAPFILE_ENGINE")
+                miss_caps.append("LOW_LEVEL_SECTOR_MAPFILE_ENGINE")
+                blocking.append("BACKEND_UNAVAILABLE")
+                lims.append("GNU ddrescue Linux native binary required for advanced phase-map readback.")
+                verif_state = "READ_ONLY_INTEGRITY_VERIFIED"
+                status = QualificationStatus.BACKEND_UNAVAILABLE
+                app = MethodApplicability.UNSUPPORTED
+                exec_state = "BACKEND_UNAVAILABLE"
+                soft_qual = "BACKEND_UNAVAILABLE"
 
             # Enforce absolute precedence of system disk safety for destructive methods (1-16)
             if is_sys and m_id <= 16:

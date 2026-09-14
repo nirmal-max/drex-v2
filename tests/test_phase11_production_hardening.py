@@ -42,6 +42,7 @@ from forensic_vault import (
 from hardware_storage import (
     DeviceIntelligenceEngine,
     Qualification25MethodEngine,
+    QualificationStatus,
     Win32ErrorClassifier,
     PreExecutionRevalidator,
 )
@@ -496,5 +497,78 @@ def test_authoritative_25_method_qualification_truth():
     # None should claim unconditional HARDWARE_QUALIFIED without physical hardware qualification
     for m in matrix.values():
         q_status = m.qualification_status.value if hasattr(m.qualification_status, "value") else str(m.qualification_status)
-        assert q_status in ("AVAILABLE", "UNQUALIFIED", "CONDITIONAL", "LIMITED", "SAFETY_BLOCKED", "UNSUPPORTED")
+        assert q_status in ("AVAILABLE", "UNQUALIFIED", "CONDITIONAL", "LIMITED", "SAFETY_BLOCKED", "UNSUPPORTED", "PARTIAL", "BACKEND_UNAVAILABLE")
         assert q_status != "HARDWARE_QUALIFIED"
+
+
+def test_six_conservative_qualification_boundaries():
+    """
+    Assert conservative Phase 11 qualification truth across simulated descriptors:
+    M03 == UNSUPPORTED / HARDWARE_REQUIRED
+    M05 == UNSUPPORTED / HARDWARE_REQUIRED
+    M21 == PARTIAL / LIMITED
+    M22 == PARTIAL / LIMITED
+    M23 == UNSUPPORTED / HARDWARE_REQUIRED
+    M24 == BACKEND_UNAVAILABLE / HARDWARE_REQUIRED
+    """
+    for bus in ("NVME", "SATA", "USB", "SCSI"):
+        sim_desc = {
+            "disk_number": 88,
+            "vendor_id": "EnterpriseVendor",
+            "product_id": f"Synthetic_{bus}",
+            "serial_number": f"SYNTH-{bus}-001",
+            "bus_type": bus,
+            "capacity_bytes": 2 * 1024 * 1024 * 1024 * 1024,
+            "is_ssd": True,
+        }
+        snap = DeviceIntelligenceEngine.create_snapshot(r"\\.\PhysicalDrive88", simulated_descriptor=sim_desc)
+        matrix = Qualification25MethodEngine.evaluate_25_methods(snap)
+
+        # M03: Device-Native Sanitize
+        assert matrix[3].qualification_status == QualificationStatus.UNSUPPORTED
+        assert matrix[3].truth_model.software_qualification == "UNSUPPORTED"
+
+        # M05: NVMe Secure Erase
+        if bus == "USB":
+            assert matrix[5].qualification_status == QualificationStatus.BLOCKED
+        else:
+            assert matrix[5].qualification_status == QualificationStatus.UNSUPPORTED
+        assert matrix[5].truth_model.software_qualification == "UNSUPPORTED"
+
+        # M21: Deep Recovery
+        assert matrix[21].qualification_status == QualificationStatus.PARTIAL
+        assert matrix[21].truth_model.software_qualification == "PARTIAL"
+
+        # M22: Fragment Recovery
+        assert matrix[22].qualification_status == QualificationStatus.PARTIAL
+        assert matrix[22].truth_model.software_qualification == "PARTIAL"
+
+        # M23: RAID / Storage Recovery
+        assert matrix[23].qualification_status == QualificationStatus.UNSUPPORTED
+        assert matrix[23].truth_model.software_qualification == "UNSUPPORTED"
+
+        # M24: Damaged Media Recovery
+        assert matrix[24].qualification_status == QualificationStatus.BACKEND_UNAVAILABLE
+        assert matrix[24].truth_model.software_qualification == "BACKEND_UNAVAILABLE"
+
+
+def test_synthetic_descriptors_cannot_promote_to_available():
+    """Verify synthetic descriptors, adapter registration, or simulation cannot promote restricted methods to AVAILABLE."""
+    sim = {
+        "disk_number": 50,
+        "vendor_id": "SimulatedNativeController",
+        "product_id": "VirtualControllerDrive",
+        "bus_type": "NVME",
+        "capacity_bytes": 10**12,
+        "is_ssd": True,
+        "native_sanitize": True,
+        "ddrescue_present": True,
+        "raid_array": True,
+    }
+    snap = DeviceIntelligenceEngine.create_snapshot(r"\\.\PhysicalDrive50", simulated_descriptor=sim)
+    matrix = Qualification25MethodEngine.evaluate_25_methods(snap)
+
+    for m_id in (3, 4, 5, 21, 22, 23, 24):
+        assert matrix[m_id].qualification_status != QualificationStatus.AVAILABLE, f"Method M{m_id:02d} was improperly promoted to AVAILABLE"
+        assert matrix[m_id].truth_model.physical_qualification != "HARDWARE_QUALIFIED", f"Method M{m_id:02d} improperly claimed HARDWARE_QUALIFIED"
+

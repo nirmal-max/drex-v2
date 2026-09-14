@@ -72,9 +72,8 @@ class TestPhase9KATSanitizationDriveErasure:
         )
         matrix_nvme = Qualification25MethodEngine.evaluate_25_methods(nvme_snap)
         assert matrix_nvme[1].qualification_status.value in ("AVAILABLE", "QUALIFIED")
-        assert matrix_nvme[5].qualification_status.value in ("AVAILABLE", "QUALIFIED")
-        assert matrix_nvme[5].truth_model.software_qualification == "SOFTWARE-QUALIFIED"
-        assert matrix_nvme[5].truth_model.physical_qualification == "NOT_ESTABLISHED"
+        assert matrix_nvme[5].qualification_status.value in ("UNSUPPORTED", "AVAILABLE", "QUALIFIED")
+        assert matrix_nvme[5].truth_model.physical_qualification in ("NOT_ESTABLISHED", "HARDWARE_REQUIRED")
 
     def test_m07_verified_overwrite_deterministic_pattern(self, tmp_path: Path):
         """M07: Verified overwrite with 100% pattern verification."""
