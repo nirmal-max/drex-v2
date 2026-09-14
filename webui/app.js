@@ -401,6 +401,176 @@ function renderVerifier() {
   `;
 }
 
+function renderCertificates() {
+  const activeCaseNumber = STATE.activeCase ? STATE.activeCase.case_number : 'NO ACTIVE CASE';
+  return `
+    <div class="card">
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
+        <div>
+          <div class="section-label">CRYPTOGRAPHIC ATTESTATION & EVIDENCE RECORD</div>
+          <h2 class="card-title">Tamper-Evident Forensic Certificates</h2>
+          <p style="color: var(--drex-text-muted); font-size: 12px; margin-top: 4px;">
+            Cryptographically signed attestation records aligned with NIST SP 800-88 Rev. 2 and referencing ISO/IEC 27037. Generated with Pure-Python PDF 1.4 compiler and verified via deterministic SHA-256 hash chains.
+          </p>
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff; padding: 6px 14px; font-size: 12px;" onclick="generateCertificateForActiveCase()">+ Issue Attestation Certificate</button>
+          <button class="action-btn" style="width: auto; background: var(--drex-bg-surface-subtle); color: var(--drex-text-main); border: 1px solid var(--drex-border-default); padding: 6px 14px; font-size: 12px;" onclick="loadCertificates()">↻ Refresh</button>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap;">
+        <span class="badge badge-pass">NIST SP 800-88 Rev. 2 Aligned</span>
+        <span class="badge badge-pass">ISO/IEC 27037 Referenced</span>
+        <span class="badge" style="background: #e0f2fe; color: #0369a1;">Pure-Python PDF 1.4</span>
+        <span class="badge" style="background: #f3e8ff; color: #6b21a8;">SHA-256 Hash Chained</span>
+      </div>
+
+      <div id="certificatesContainer" class="mt-16">
+        <div style="padding: 24px; text-align: center; color: var(--drex-text-muted); font-size: 13px;">
+          Loading forensic certificates for active case (${esc(activeCaseNumber)})...
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadCertificates() {
+  const container = document.getElementById('certificatesContainer');
+  if (!container) return;
+  const caseId = STATE.activeCase ? STATE.activeCase.case_id : '';
+  try {
+    const certs = await api(`/api/certificates${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ''}`);
+    STATE.certificates = certs || [];
+    if (STATE.certificates.length === 0) {
+      container.innerHTML = `
+        <div style="padding: 32px; text-align: center; background: var(--drex-bg-surface-subtle); border-radius: var(--drex-radius-md); border: 1px dashed var(--drex-border-default);">
+          <div style="font-size: 24px; margin-bottom: 8px;">📜</div>
+          <p style="font-weight: 600; font-size: 14px;">No Certificates Issued Yet</p>
+          <p style="font-size: 12px; color: var(--drex-text-muted); margin-top: 4px;">Execute a sanitization or recovery operation, then click "Issue Attestation Certificate".</p>
+          <button class="action-btn" style="width: auto; margin-top: 12px; background: var(--drex-primary); color: #fff; padding: 6px 14px; font-size: 12px;" onclick="generateCertificateForActiveCase()">✦ Issue Initial Certificate</button>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = STATE.certificates.map(c => `
+      <div class="card" style="margin-bottom: 14px; border: 1px solid var(--drex-border-default); background: var(--drex-bg-surface);">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px;">
+          <div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-weight: 700; font-size: 14px; font-family: var(--drex-font-mono); color: var(--drex-primary);">${esc(c.certificate_id)}</span>
+              <span class="badge badge-pass">${esc(c.execution_state)}</span>
+              <span class="badge" style="background: var(--drex-bg-surface-subtle);">${esc(c.verification_state)}</span>
+              ${c.physical_execution === 'NOT_EXECUTED' ? '<span class="badge" style="background: #fef3c7; color: #92400e;">Hardware Exec: NOT EXECUTED</span>' : ''}
+            </div>
+            <div style="font-size: 12px; color: var(--drex-text-muted); margin-top: 4px;">
+              Case: <strong>${esc(c.case_name)}</strong> (${esc(c.case_id)}) &middot; Examiner: <strong>${esc(c.examiner_name)}</strong> &middot; Issued: ${esc(c.timestamp_utc)}
+            </div>
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+            <a class="action-btn" style="width: auto; text-decoration: none; padding: 5px 12px; font-size: 11px; background: #059669; color: #fff;" href="${esc(c.pdf_download_url || `/api/certificates/${c.certificate_id}/pdf?case_id=${c.case_id}`)}" download="${esc(c.certificate_id)}.pdf" target="_blank">📥 Download PDF</a>
+            <button class="action-btn" style="width: auto; padding: 5px 12px; font-size: 11px; background: var(--drex-primary); color: #fff;" onclick="verifyCertificateAction('${esc(c.case_id)}', '${esc(c.certificate_id)}')">✓ Verify Integrity</button>
+          </div>
+        </div>
+
+        <div class="grid grid-3 mt-12" style="background: var(--drex-bg-surface-subtle); padding: 10px; border-radius: var(--drex-radius-sm); font-size: 11px;">
+          <div>
+            <span style="color: var(--drex-text-muted);">Target:</span> <strong>${esc(c.target_name)}</strong> (${esc(c.target_type)})
+          </div>
+          <div>
+            <span style="color: var(--drex-text-muted);">Method:</span> <strong>[Method ${c.method_id}] ${esc(c.method_name)}</strong>
+          </div>
+          <div>
+            <span style="color: var(--drex-text-muted);">Standard:</span> <strong>${esc(c.standard_reference)}</strong>
+          </div>
+        </div>
+
+        <div style="margin-top: 10px; font-size: 10px; font-family: var(--drex-font-mono); color: var(--drex-text-muted); word-break: break-all;">
+          <div>SHA-256 Integrity Token: <span style="color: var(--drex-text-main);">${esc(c.tamper_evident_signature)}</span></div>
+          <div>Audit Event Hash: <span style="color: var(--drex-text-main);">${esc(c.audit_chain_event_hash)}</span></div>
+        </div>
+
+        <div id="verifyResult_${esc(c.certificate_id)}" style="display: none; margin-top: 10px; padding: 8px 12px; border-radius: 4px; font-size: 11px;"></div>
+      </div>
+    `).join('');
+  } catch (ex) {
+    container.innerHTML = `<div style="color: var(--drex-status-fail); padding: 12px;">Failed to load certificates: ${esc(ex.message || String(ex))}</div>`;
+  }
+}
+
+async function generateCertificateForActiveCase() {
+  if (!STATE.activeCase) {
+    showToast('No active case selected.', 'warning');
+    return;
+  }
+  try {
+    showToast('Generating tamper-evident cryptographic certificate...', 'info');
+    const res = await api('/api/certificates/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        case_id: STATE.activeCase.case_id,
+        target_identifier: 'PHYSICALDRIVE1_LOGICAL_TARGET',
+        method_id: 8,
+        examiner_name: STATE.currentPersona ? PERSONAS[STATE.currentPersona].name : 'Forensic Examiner',
+      }),
+    });
+    showToast(`Certificate ${res.certificate_id} issued successfully!`, 'success');
+    loadCertificates();
+  } catch (ex) {
+    showToast(`Certificate generation failed: ${ex.message || String(ex)}`, 'danger');
+  }
+}
+
+async function verifyCertificateAction(caseId, certId) {
+  const targetBox = document.getElementById(`verifyResult_${certId}`);
+  if (targetBox) {
+    targetBox.style.display = 'block';
+    targetBox.style.background = 'var(--drex-bg-surface-subtle)';
+    targetBox.innerHTML = `<em>Calculating SHA-256 preimages and verifying audit chain linkage...</em>`;
+  }
+  try {
+    const res = await api('/api/certificates/verify', {
+      method: 'POST',
+      body: JSON.stringify({
+        case_id: caseId,
+        certificate_id: certId,
+      }),
+    });
+    if (targetBox) {
+      if (res.valid) {
+        targetBox.style.background = '#ecfdf5';
+        targetBox.style.border = '1px solid #10b981';
+        targetBox.style.color = '#065f46';
+        targetBox.innerHTML = `
+          <strong>✓ PASS — ${esc(res.verdict)}</strong>
+          <div style="font-size: 10px; margin-top: 4px;">
+            Cert Hash: ${res.certificate_hash_valid ? 'VALID' : 'INVALID'} &middot;
+            PDF Hash: ${res.pdf_hash_valid ? 'VALID' : 'INVALID'} &middot;
+            Audit Chain: ${res.audit_chain_valid ? 'VALID' : 'INVALID'} &middot;
+            Case Binding: ${res.case_binding_valid ? 'VALID' : 'INVALID'}
+          </div>
+        `;
+      } else {
+        targetBox.style.background = '#fef2f2';
+        targetBox.style.border = '1px solid #ef4444';
+        targetBox.style.color = '#991b1b';
+        targetBox.innerHTML = `
+          <strong>✕ FAIL — ${esc(res.verdict)}</strong>
+          <div style="font-size: 10px; margin-top: 4px;">${res.details.map(d => `&bull; ${esc(d)}`).join('<br>')}</div>
+        `;
+      }
+    }
+  } catch (ex) {
+    if (targetBox) {
+      targetBox.style.display = 'block';
+      targetBox.style.background = '#fef2f2';
+      targetBox.style.color = '#991b1b';
+      targetBox.innerHTML = `Verification error: ${esc(ex.message || String(ex))}`;
+    }
+  }
+}
+
 function renderGeneric(viewId) {
   const title = VIEW_TITLES[viewId] || 'Forensic Workstation Module';
   return `
@@ -441,6 +611,7 @@ function navigateTo(viewId) {
     case 'overview': viewport.innerHTML = renderOverview(); break;
     case 'methods': viewport.innerHTML = render25Methods(); break;
     case 'cases': viewport.innerHTML = renderCases(); break;
+    case 'certificates': viewport.innerHTML = renderCertificates(); loadCertificates(); break;
     case 'drive_eraser': viewport.innerHTML = renderDriveEraser(); break;
     case 'recovery':
     case 'carving': viewport.innerHTML = renderRecovery(); break;

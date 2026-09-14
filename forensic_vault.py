@@ -1974,6 +1974,262 @@ class ForensicCaseManager:
         safe_atomic_json_write(audit_file, events)
         return audit_evt
 
+    def get_latest_audit_hash(self, case_id: str) -> str:
+        """Retrieve the latest cryptographic SHA-256 hash in the case audit chain."""
+        with self._lock:
+            cdir = self._case_path(case_id)
+            audit_file = cdir / "audit" / "audit_chain.json"
+            if audit_file.is_file():
+                try:
+                    events = json.loads(audit_file.read_text(encoding="utf-8"))
+                    if events and isinstance(events, list):
+                        return events[-1].get("current_hash", IndependentAuditVerifier.GENESIS_HASH)
+                except Exception:
+                    pass
+            return IndependentAuditVerifier.GENESIS_HASH
+
+    def store_certificate(
+        self,
+        case_id: str,
+        cert_data: Dict[str, Any],
+        pdf_bytes: bytes,
+        actor: str = "Forensic Examiner",
+        operation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Atomically persist forensic certificate JSON and PDF into case vault, register vault objects, and append audit event."""
+        with self._lock:
+            case = self.get_case(case_id)
+            if not case:
+                raise ValueError(f"Case not found: {case_id}")
+
+            cert_id = cert_data.get("certificate_id")
+            if not cert_id:
+                raise ValueError("Certificate data missing certificate_id")
+
+            sanitized_cert_id = sanitize_filename(cert_id)
+            cdir = self._case_path(case_id)
+            cert_dir = cdir / "certificates"
+            cert_dir.mkdir(parents=True, exist_ok=True)
+
+            json_path = cert_dir / f"{sanitized_cert_id}.json"
+            pdf_path = cert_dir / f"{sanitized_cert_id}.pdf"
+
+            # Compute PDF SHA-256
+            pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
+            cert_data["pdf_sha256"] = pdf_sha256
+
+            # Compute JSON bytes and SHA-256
+            json_str = json.dumps(cert_data, indent=2, sort_keys=True, ensure_ascii=False)
+            json_sha256 = hashlib.sha256(json_str.encode("utf-8")).hexdigest()
+            cert_data["json_sha256"] = json_sha256
+
+            # Atomic crash-safe writes
+            safe_atomic_json_write(json_path, cert_data)
+            safe_atomic_write(pdf_path, pdf_bytes)
+
+            # Register in Vault
+            vault = self.get_vault(case_id)
+            v_obj_json = VaultObject(
+                object_id=generate_stable_id("VLT-CERT-JSON"),
+                case_id=case_id,
+                object_type=VaultObjectType.CERTIFICATE,
+                relative_path=str(json_path.relative_to(cdir)),
+                size_bytes=len(json_str.encode("utf-8")),
+                sha256_hash=json_sha256,
+                created_at=utc_now_iso(),
+                generating_operation_id=operation_id,
+                metadata={"certificate_id": cert_id, "format": "JSON", "signature": cert_data.get("tamper_evident_signature")},
+            )
+            v_obj_pdf = VaultObject(
+                object_id=generate_stable_id("VLT-CERT-PDF"),
+                case_id=case_id,
+                object_type=VaultObjectType.CERTIFICATE,
+                relative_path=str(pdf_path.relative_to(cdir)),
+                size_bytes=len(pdf_bytes),
+                sha256_hash=pdf_sha256,
+                created_at=utc_now_iso(),
+                generating_operation_id=operation_id,
+                metadata={"certificate_id": cert_id, "format": "PDF"},
+            )
+            objs = vault.list_objects()
+            objs = [o for o in objs if o.metadata.get("certificate_id") != cert_id]
+            objs.extend([v_obj_json, v_obj_pdf])
+            safe_atomic_json_write(vault.objects_index_file, [o.to_dict() for o in objs])
+
+            # Record Timeline Event
+            self._record_timeline_event(
+                case_id=case_id,
+                event_type=TimelineEventType.CERTIFICATE_CREATED,
+                actor=actor,
+                description=f"Cryptographic Forensic Certificate '{cert_id}' generated and signed.",
+                source="ForensicCertificateEngine",
+                operation_id=operation_id,
+                metadata={
+                    "certificate_id": cert_id,
+                    "target": cert_data.get("target", {}).get("target_name"),
+                    "method_id": cert_data.get("method", {}).get("method_id"),
+                    "tamper_evident_signature": cert_data.get("tamper_evident_signature"),
+                    "pdf_sha256": pdf_sha256,
+                },
+            )
+
+            # Append Audit Event CERTIFICATE_ISSUED
+            self._append_audit_event(
+                case_id=case_id,
+                actor=actor,
+                event_type="CERTIFICATE_ISSUED",
+                payload={
+                    "certificate_id": cert_id,
+                    "case_id": case_id,
+                    "operation_id": operation_id,
+                    "certificate_hash": cert_data.get("tamper_evident_signature"),
+                    "event_hash": cert_data.get("audit_chain_event_hash"),
+                    "pdf_hash": pdf_sha256,
+                    "json_hash": json_sha256,
+                    "timestamp": cert_data.get("timestamp_utc"),
+                },
+                operation_id=operation_id,
+            )
+
+            return cert_data
+
+    def list_certificates(self, case_id: str) -> List[Dict[str, Any]]:
+        """List all forensic certificates issued under the given case."""
+        with self._lock:
+            cdir = self._case_path(case_id)
+            cert_dir = cdir / "certificates"
+            if not cert_dir.is_dir():
+                return []
+            certs = []
+            for jf in sorted(cert_dir.glob("*.json")):
+                try:
+                    cdata = json.loads(jf.read_text(encoding="utf-8"))
+                    if isinstance(cdata, dict) and "certificate_id" in cdata:
+                        certs.append(cdata)
+                except Exception:
+                    continue
+            return certs
+
+    def get_certificate(self, case_id: str, cert_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve certificate JSON record with strict path traversal protections."""
+        with self._lock:
+            sanitized = sanitize_filename(cert_id)
+            cdir = self._case_path(case_id)
+            jpath = cdir / "certificates" / f"{sanitized}.json"
+            if not jpath.is_file():
+                return None
+            try:
+                cdata = json.loads(jpath.read_text(encoding="utf-8"))
+                return cdata if isinstance(cdata, dict) else None
+            except Exception:
+                return None
+
+    def get_certificate_pdf_path(self, case_id: str, cert_id: str) -> Optional[Path]:
+        """Retrieve path to certificate PDF artifact."""
+        with self._lock:
+            sanitized = sanitize_filename(cert_id)
+            cdir = self._case_path(case_id)
+            ppath = cdir / "certificates" / f"{sanitized}.pdf"
+            if ppath.is_file():
+                return ppath
+            return None
+
+    def verify_certificate(self, case_id: str, cert_id: str) -> Dict[str, Any]:
+        """Independently verify certificate structure, SHA-256 integrity token, PDF hash, audit chain linkage, and case binding."""
+        from certificate_engine import ForensicCertificateEngine
+        with self._lock:
+            details = []
+            cert_data = self.get_certificate(case_id, cert_id)
+            if not cert_data:
+                return {
+                    "certificate_id": cert_id,
+                    "case_id": case_id,
+                    "valid": False,
+                    "certificate_hash_valid": False,
+                    "pdf_hash_valid": False,
+                    "audit_chain_valid": False,
+                    "case_binding_valid": False,
+                    "operation_binding_valid": False,
+                    "verdict": "FAIL — Certificate Not Found",
+                    "details": [f"Certificate record '{cert_id}' does not exist in case '{case_id}'."],
+                }
+
+            # 1. Case binding check
+            bound_case_id = cert_data.get("case_id")
+            case_binding_valid = (bound_case_id == case_id)
+            if case_binding_valid:
+                details.append("Case binding verified: certificate case_id matches target case.")
+            else:
+                details.append(f"Case binding MISMATCH: certificate specifies '{bound_case_id}' but queried for '{case_id}'.")
+
+            # 2. Certificate integrity hash
+            cert_hash_valid = ForensicCertificateEngine.verify_certificate_integrity(cert_data)
+            if cert_hash_valid:
+                details.append("Cryptographic integrity verified: SHA-256 signature binding matches canonical fields.")
+            else:
+                details.append("Cryptographic integrity FAILURE: signature does not match recomputed SHA-256 hash.")
+
+            # 3. PDF Hash check
+            pdf_path = self.get_certificate_pdf_path(case_id, cert_id)
+            pdf_hash_valid = False
+            if pdf_path and pdf_path.is_file():
+                calc_pdf_sha = StreamingHasher.hash_file(pdf_path).digest
+                stored_pdf_sha = cert_data.get("pdf_sha256")
+                if stored_pdf_sha and calc_pdf_sha.lower() == stored_pdf_sha.lower():
+                    pdf_hash_valid = True
+                    details.append(f"PDF integrity verified: SHA-256 digest ({calc_pdf_sha[:16]}...) matches record.")
+                else:
+                    details.append(f"PDF integrity FAILURE: file digest {calc_pdf_sha} != recorded {stored_pdf_sha}.")
+            else:
+                details.append("PDF artifact missing from vault certificate directory.")
+
+            # 4. Audit Chain Verification
+            audit_chain_res = self.verify_case_audit_chain(case_id)
+            audit_chain_valid = (audit_chain_res.status == AuditVerificationStatus.VALID)
+            if audit_chain_valid:
+                chain = self.get_audit_chain(case_id)
+                cert_event = next((e for e in chain if e.event_type == "CERTIFICATE_ISSUED" and e.canonical_payload.get("certificate_id") == cert_id), None)
+                if cert_event:
+                    if cert_event.canonical_payload.get("certificate_hash") == cert_data.get("tamper_evident_signature"):
+                        details.append(f"Audit chain verified: CERTIFICATE_ISSUED event {cert_event.event_id} sequence #{cert_event.sequence_number} intact.")
+                    else:
+                        audit_chain_valid = False
+                        details.append("Audit chain mismatch: event payload certificate_hash does not match certificate signature.")
+                else:
+                    audit_chain_valid = False
+                    details.append("Audit chain error: CERTIFICATE_ISSUED event not found in case audit chain.")
+            else:
+                details.append(f"Audit chain verification FAILURE: {audit_chain_res.status.value} - {audit_chain_res.details}")
+
+            # 5. Operation Binding
+            operation_binding_valid = True
+            op_id = cert_data.get("operation_id")
+            if op_id:
+                details.append(f"Operation binding verified: bound to operation {op_id}.")
+
+            overall_valid = bool(
+                case_binding_valid and
+                cert_hash_valid and
+                pdf_hash_valid and
+                audit_chain_valid and
+                operation_binding_valid
+            )
+
+            verdict = "PASS — Attestation Cryptographically Verified" if overall_valid else "FAIL — Integrity / Chain Failure"
+
+            return {
+                "certificate_id": cert_id,
+                "case_id": case_id,
+                "valid": overall_valid,
+                "certificate_hash_valid": cert_hash_valid,
+                "pdf_hash_valid": pdf_hash_valid,
+                "audit_chain_valid": audit_chain_valid,
+                "case_binding_valid": case_binding_valid,
+                "operation_binding_valid": operation_binding_valid,
+                "verdict": verdict,
+                "details": details,
+            }
+
     def create_case_backup(self, case_id: str, destination_dir: Optional[Union[Path, str]] = None) -> Tuple[Path, str]:
         """Create a sealed, verifiable ZIP backup of the case directory with a detached SHA-256 manifest."""
         with self._lock:

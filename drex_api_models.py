@@ -357,3 +357,61 @@ class CaseRestoreResponse(BaseModel):
     status: str = "RESTORE_COMPLETED"
 
 
+# ─── Certificate & Attestation Models ─────────────────────────────────────────
+
+class CertificateGenerateRequest(BaseModel):
+    case_id: str
+    operation_id: Optional[str] = None
+    job_id: Optional[str] = None
+    target_identifier: Optional[str] = None
+    method_id: Optional[int] = None
+    examiner_name: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class CertificateRecordModel(BaseModel):
+    certificate_id: str
+    certificate_version: str = "2.0"
+    case_id: str
+    case_name: str
+    examiner_name: str
+    organization: str
+    timestamp_utc: str
+    target_name: str
+    target_type: str
+    device_model: str = "GENERIC_STORAGE"
+    serial_number: str = "UNKNOWN_SERIAL"
+    capacity_bytes: int = 0
+    method_id: int
+    method_name: str
+    standard_reference: str
+    pass_count: int = 1
+    execution_state: str = "REAL"
+    verification_state: str = "EXACT_READBACK"
+    physical_execution: str = "NOT_EXECUTED"
+    prior_audit_hash: str
+    audit_chain_event_hash: str
+    tamper_evident_signature: str
+    pdf_sha256: Optional[str] = None
+    pdf_download_url: Optional[str] = None
+    forensic_limitations: List[str] = Field(default_factory=list)
+
+
+class CertificateVerifyRequest(BaseModel):
+    certificate_id: str
+    case_id: str
+
+
+class CertificateVerifyResponse(BaseModel):
+    certificate_id: str
+    case_id: str
+    valid: bool
+    certificate_hash_valid: bool
+    pdf_hash_valid: bool
+    audit_chain_valid: bool
+    case_binding_valid: bool
+    operation_binding_valid: bool
+    verdict: str
+    details: List[str] = Field(default_factory=list)
+
+
