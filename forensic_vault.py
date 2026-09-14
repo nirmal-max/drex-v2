@@ -188,7 +188,7 @@ def safe_atomic_write(path: Path, content: Union[str, bytes]) -> None:
     fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
         if isinstance(content, str):
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -203,6 +203,7 @@ def safe_atomic_write(path: Path, content: Union[str, bytes]) -> None:
             os.unlink(tmp_name)
         except FileNotFoundError:
             pass
+
 
 
 def safe_atomic_json_write(path: Path, data: Any) -> None:
@@ -956,39 +957,64 @@ class CasePackageManager:
     """
 
     @classmethod
-    def export_package(cls, case_dir: Path, output_tar_path: Union[str, Path]) -> Path:
+    def export_package(cls, case_dir: Path, output_tar_path: Union[str, Path], schema_version: str = "2.0") -> Path:
         case_dir = Path(case_dir).resolve()
         out_path = Path(output_tar_path).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         manifest_entries: Dict[str, Dict[str, Any]] = {}
+        objects_list: List[Dict[str, Any]] = []
 
         # 1. Build manifest of all files in case directory
         for f in sorted(case_dir.rglob("*")):
             if f.is_file():
                 rel = f.relative_to(case_dir).as_posix()
+                if rel in ("manifest.json", "manifest.sha256", "manifest.tmp.json"):
+                    continue
                 h_rec = StreamingHasher.hash_file(f)
                 manifest_entries[rel] = {
                     "size_bytes": h_rec.byte_count,
                     "sha256": h_rec.digest,
                 }
+                # Determine object type from parent directory
+                parent_dir = rel.split("/")[0].upper() if "/" in rel else "ROOT"
+                objects_list.append({
+                    "object_id": f"OBJ-{h_rec.digest[:12].upper()}",
+                    "relative_path": rel,
+                    "object_type": parent_dir,
+                    "size_bytes": h_rec.byte_count,
+                    "sha256": h_rec.digest,
+                })
+
+        # Deterministically sort objects by relative_path
+        objects_list.sort(key=lambda o: o["relative_path"])
 
         manifest = {
-            "schema_version": 1,
+            "schema_version": schema_version,
+            "drex_version": "1.0.0",
             "export_timestamp": utc_now_iso(),
             "case_directory": case_dir.name,
+            "case_id": case_dir.name,
             "total_files": len(manifest_entries),
+            "total_declared_objects": len(objects_list),
             "files": manifest_entries,
+            "objects": objects_list,
         }
 
         manifest_file = case_dir / "manifest.json"
-        safe_atomic_json_write(manifest_file, manifest)
+        manifest_content = json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False)
+        safe_atomic_write(manifest_file, manifest_content)
 
-        # Include manifest itself in tar
+        # Generate manifest.sha256 root digest
+        manifest_sha = hashlib.sha256(manifest_content.encode("utf-8")).hexdigest()
+        manifest_sha_file = case_dir / "manifest.sha256"
+        safe_atomic_write(manifest_sha_file, f"{manifest_sha}  manifest.json\n")
+
+        # Include all files including manifest and manifest.sha256 in tar
         temp_tar = out_path.with_suffix(".tmp.tar.gz")
         with tarfile.open(temp_tar, "w:gz") as tar:
             for f in sorted(case_dir.rglob("*")):
-                if f.is_file():
+                if f.is_file() and not f.name.endswith(".tmp") and not f.name.endswith(".tmp.json"):
                     rel = f.relative_to(case_dir).as_posix()
                     tar.add(f, arcname=rel)
 
@@ -1049,7 +1075,8 @@ class CasePackageManager:
                 )
 
             manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-            if manifest.get("schema_version") != 1:
+            s_ver = manifest.get("schema_version")
+            if s_ver not in (1, "1", "1.0", 2, "2", "2.0"):
                 return PackageValidationResult(
                     status=PackageValidationStatus.SCHEMA_MISMATCH,
                     manifest_valid=False,
@@ -1059,13 +1086,18 @@ class CasePackageManager:
                     error_message=f"Unsupported package schema version: {manifest.get('schema_version')}",
                 )
 
-            files_map = manifest.get("files", {})
+            files_map = manifest.get("files")
+            if files_map is None and "objects" in manifest:
+                files_map = {obj["relative_path"]: {"size_bytes": obj.get("size_bytes"), "sha256": obj.get("sha256")} for obj in manifest["objects"]}
+            elif files_map is None:
+                files_map = {}
+
             verified = 0
             corrupted = 0
 
             # 2. Re-verify SHA-256 digests of all package files
             for rel_posix, meta in files_map.items():
-                if rel_posix == "manifest.json":
+                if rel_posix in ("manifest.json", "manifest.sha256"):
                     continue
                 item_path = extract_temp / Path(rel_posix)
                 if not item_path.is_file():

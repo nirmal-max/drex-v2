@@ -3289,7 +3289,7 @@ class DrexApp(tk.Tk):
             ("Wipe File/Folder", BLUE, "file", "Erase specific files or folders"),
             ("Recover", PURPLE, "recover", "Recover deleted files & partitions"),
             ("Destroy Drive", RED, "destroy", "Assess device destruction"),
-            ("Certificates", BLUE, "cert", "View cryptographically signed records"),
+            ("Certificates", BLUE, "cert", "View verified evidence records"),
         ]
         for op_name, op_color, op_icon, op_sub in op_items:
             card = self._card(ops)
@@ -4487,7 +4487,7 @@ class DrexApp(tk.Tk):
         except tk.TclError:
             previous_query = ""
 
-        self._header("Certificate Centre", "View, search and manage cryptographically signed operation certificates.")
+        self._header("Certificate Centre", "View, search, and independently verify hash-bound operation certificates and evidence packages.")
 
         tabs = tk.Frame(self.page, bg="white", highlightbackground=LINE, highlightthickness=1)
         tabs.pack(fill="x", padx=28, pady=(18, 0))
@@ -4500,6 +4500,9 @@ class DrexApp(tk.Tk):
             if active:
                 underline = tk.Frame(tabs, bg=BLUE, height=3)
                 underline.place(in_=tab_btn, relx=0, rely=1.0, relwidth=1, anchor="sw")
+
+        verify_btn = tk.Button(tabs, text="🛡 Verify External Package", relief="flat", bd=0, bg=BLUE_LIGHT, fg=BLUE, font=("Segoe UI", 9, "bold"), padx=16, pady=8, cursor="hand2", command=self.verify_external_package_dialog)
+        verify_btn.pack(side="right", padx=12, pady=8)
 
         search_card = tk.Frame(self.page, bg="white", highlightbackground=LINE, highlightthickness=1)
         search_card.pack(fill="x", padx=28, pady=(12, 12))
@@ -4585,6 +4588,46 @@ class DrexApp(tk.Tk):
         path = Path(record.get("pdf_path", ""))
         if path.exists():
             os.startfile(str(path)) if os.name == "nt" else subprocess.Popen(["xdg-open", str(path)])
+
+    def verify_external_package_dialog(self):
+        """Open file dialog to select an evidence package and display independent verifier results."""
+        chosen = filedialog.askopenfilename(
+            title="Select Evidence Package Archive",
+            filetypes=[("Package Archives", "*.tar.gz *.tar *.zip"), ("All Files", "*.*")],
+        )
+        if not chosen:
+            # Try folder selection
+            chosen = filedialog.askdirectory(title="Or Select Evidence Package Directory")
+            if not chosen:
+                return
+
+        try:
+            import drex_verify
+            verifier = drex_verify.IndependentPackageVerifier(chosen)
+            report = verifier.verify()
+
+            verdict_color = GREEN_DARK if report.final_verdict == drex_verify.VerificationVerdict.PASS else (RED if report.final_verdict in (drex_verify.VerificationVerdict.TAMPERED, drex_verify.VerificationVerdict.INVALID) else ORANGE)
+            summary_msg = (
+                f"Package: {Path(chosen).name}\n"
+                f"Verdict: [{report.final_verdict.value}] (Code {report.exit_code})\n\n"
+                f"• Objects Declared: {report.summary.objects_declared}\n"
+                f"• Objects Verified: {report.summary.objects_verified}\n"
+                f"• Objects Tampered: {report.summary.objects_tampered}\n"
+                f"• Objects Missing: {report.summary.objects_missing}\n"
+                f"• Audit Events Valid: {report.summary.audit_events_verified}\n"
+                f"• Custody Records Valid: {report.summary.custody_records_verified}\n"
+                f"• Certificates Valid: {report.summary.certificates_verified}\n"
+                f"• Cross-Link Failures: {report.summary.cross_link_errors}\n"
+            )
+            if report.diagnostics:
+                summary_msg += "\nDiagnostics:\n" + "\n".join(f"• [{d.level}] {d.target}: {d.message}" for d in report.diagnostics[:5])
+
+            if report.final_verdict == drex_verify.VerificationVerdict.PASS:
+                messagebox.showinfo("Independent Package Verification Passed", summary_msg)
+            else:
+                messagebox.showwarning(f"Independent Package Verification: {report.final_verdict.value}", summary_msg)
+        except Exception as exc:
+            messagebox.showerror("Verification Error", f"Failed to execute independent verifier: {exc}")
 
     # ── Page: Help ──────────────────────────────────────────────────
     def render_help(self):

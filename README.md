@@ -13,7 +13,8 @@
 - **Fail-Closed Capability Engine**: Real-time capability detection. Uninstalled tools or unsupported platforms are strictly reported as `BACKEND UNAVAILABLE` or `UNSUPPORTED`.
 - **Read-Only Source Enforcement**: Recovery operations never write to or modify the source disk, disk image, or partition.
 - **Directory Hierarchy Preservation**: Folder recovery preserves complete nested directory structures (`PROJECT/DATA/subfile.txt`).
-- **Tamper-Evident Cryptographic Certificates**: Every verified operation generates an offline-verifiable certificate signed with **ECDSA P-256 / SHA-256** and accompanied by an encoded QR code and PDF report.
+- **Tamper-Evident Evidence Records**: Every verified operation generates an offline-verifiable certificate with **SHA-256 cryptographic integrity binding** and a cryptographically hash-linked audit ledger.
+- **Standalone Independent Verifier (`drex_verify.py`)**: Zero-dependency headless CLI and library capable of independently validating evidence packages without trusting runtime status flags.
 - **System Protection**: Built-in safeguards protect system volumes (`C:\`), Windows directories (`System32`, `WinSxS`), and application binaries.
 
 ---
@@ -46,6 +47,24 @@ python drex_app.py
 ## System Diagnostics (`drex doctor`)
 
 Run `python drex_app.py --doctor` to inspect local backend tools, detected storage devices, administrative privileges, and method counts in structured JSON.
+
+---
+
+## Independent Evidence Package Verification (`drex_verify.py`)
+
+DREX produces portable, self-contained forensic evidence packages (Schema 2.0).
+Use `drex_verify.py` to independently re-verify evidence file hashes, audit chains, custody ledgers, and certificates without trusting runtime flags or requiring DREX dependencies:
+
+```powershell
+# Verify an exported package directory or archive
+python drex_verify.py path/to/evidence_package.tar.gz
+
+# Output machine-readable verification report
+python drex_verify.py path/to/evidence_package.tar.gz --json
+
+# Save report and standalone SHA-256 hash
+python drex_verify.py path/to/evidence_package.tar.gz --out verification_report.json
+```
 
 ---
 

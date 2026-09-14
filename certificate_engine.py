@@ -8,7 +8,7 @@ Tamper-Evident Forensic Certification.
 Capabilities:
 1. Structured JSON Certificate Generation with cryptographic hash-chain binding.
 2. Pure Python Standard-Library PDF 1.4 Certificate Rendering (Zero external dependencies).
-3. Cryptographic Signature & Audit Ledger Verification.
+3. Cryptographic SHA-256 Integrity Binding & Audit Ledger Verification.
 4. Truth Model Integrity (Execution, Verification, Software Qualification, Physical States).
 
 Zero external dependencies (Python standard library only: json, os, hashlib, time, uuid, struct, dataclasses).
@@ -319,7 +319,7 @@ class ForensicCertificateEngine:
         writer.add_line(f"Qualification:   {certificate.truth_model.qualification} | Physical Exec: {certificate.truth_model.physical_execution}")
         writer.add_line(f"Prior Node Hash: {certificate.audit_chain_prior_hash[:32]}...")
         writer.add_line(f"Audit Event Hash:{certificate.audit_chain_event_hash}")
-        writer.add_line(f"Digital Sign:    {certificate.tamper_evident_signature}")
+        writer.add_line(f"Integrity Token: {certificate.tamper_evident_signature}")
         writer.add_line("---")
         writer.add_line("[SECTION] 5. FORENSIC DISCLAIMERS & LIMITATIONS")
         for lim in certificate.forensic_limitations:
@@ -335,7 +335,7 @@ class ForensicCertificateEngine:
 
     @classmethod
     def verify_certificate_integrity(cls, cert_dict: Dict[str, Any]) -> bool:
-        """Verify certificate signature and internal hash consistency."""
+        """Verify certificate SHA-256 integrity binding and internal hash consistency."""
         try:
             cert_id = cert_dict["certificate_id"]
             case_id = cert_dict["case_id"]
