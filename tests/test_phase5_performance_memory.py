@@ -14,10 +14,19 @@ from recovery_adapter import DirectDamagedMediaImager, VirtualRaidReconstructor
 
 
 class TestPhase5MemoryQualification:
-    """Empirical memory qualification tracking peak RSS / buffer deltas."""
+    """Empirical memory qualification tracking peak process heap deltas via tracemalloc.
+
+    QUALIFICATION SCOPE & LIMITATIONS:
+      - Workload: Streaming chunked disk acquisition and single-stripe RAID rebuild.
+      - Test Environment: Windows Python 3.13, single-process execution.
+      - Measured: Process heap allocation delta during streaming operations via tracemalloc.
+      - Established: TEST-VERIFIED BOUNDED STREAMING (O(1) buffer overhead for sequential stream I/O).
+      - NOT Established: Universal memory bounds across unconstrained multi-permutation search trees
+        or third-party GUI tool invocations.
+    """
 
     def test_damaged_media_streaming_memory_bound(self, tmp_path):
-        # Generate 10 MB synthetic source file
+        """Test bounded streaming memory on 10 MB synthetic source."""
         fixture_size = 10 * 1024 * 1024  # 10 MB
         chunk_size = 64 * 1024           # 64 KB chunk buffer
 
@@ -32,8 +41,6 @@ class TestPhase5MemoryQualification:
                 f.write(chunk_data)
 
         tracemalloc.start()
-        snapshot_before = tracemalloc.take_snapshot()
-
         res = DirectDamagedMediaImager.image_source(
             source_data=src,
             output_image_path=out_img,
@@ -41,19 +48,47 @@ class TestPhase5MemoryQualification:
             sector_size=512,
             chunk_size=chunk_size,
         )
-
-        snapshot_after = tracemalloc.take_snapshot()
         current, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
-        # The peak memory delta must be well under 4 MB (far below the 10 MB disk image size)
         peak_mb = peak / (1024 * 1024)
         assert peak_mb < 5.0, f"Observed peak memory {peak_mb:.2f} MB exceeds 5 MB bound for 10 MB image"
         assert res["total_bytes"] == fixture_size
         assert res["rescued_bytes"] == fixture_size
 
+    def test_damaged_media_50mb_streaming_memory_bound(self, tmp_path):
+        """Strengthen evidence with 50 MB synthetic source verifying constant O(1) buffer."""
+        fixture_size = 50 * 1024 * 1024  # 50 MB
+        chunk_size = 64 * 1024           # 64 KB chunk buffer
+
+        src = tmp_path / "50mb_source.raw"
+        out_img = tmp_path / "50mb_out.raw"
+        out_map = tmp_path / "50mb_out.map"
+
+        chunk_data = (b"DREX_SYNTHETIC_DATA_STREAM_50MB_" * 3000)[:chunk_size]
+        with open(src, "wb") as f:
+            for _ in range(fixture_size // chunk_size):
+                f.write(chunk_data)
+
+        tracemalloc.start()
+        res = DirectDamagedMediaImager.image_source(
+            source_data=src,
+            output_image_path=out_img,
+            mapfile_path=out_map,
+            sector_size=512,
+            chunk_size=chunk_size,
+        )
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        peak_mb = peak / (1024 * 1024)
+        # Even with a 50 MB fixture (5x larger), peak memory delta remains constant O(1) < 5 MB
+        assert peak_mb < 5.0, f"Observed peak memory {peak_mb:.2f} MB exceeds 5 MB bound for 50 MB image"
+        assert res["total_bytes"] == fixture_size
+        assert res["rescued_bytes"] == fixture_size
+
     def test_raid5_streaming_memory_bound(self, tmp_path):
-        # 3 disks of 5 MB each (total 10 MB reconstructed)
+        """Test bounded streaming memory on 10 MB RAID-5 reconstructed array."""
         disk_size = 5 * 1024 * 1024
         chunk_size = 64 * 1024
 

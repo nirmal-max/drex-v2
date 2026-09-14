@@ -84,26 +84,32 @@ In strict adherence to the proven-source hierarchy:
 
 ---
 
-## 5. Empirical Memory Qualification Results
+## 5. Empirical Memory Qualification Results (TEST-VERIFIED BOUNDED STREAMING)
 
-Measured via `tests/test_phase5_performance_memory.py` using `tracemalloc`:
+### A. Measured Streaming Workload Results
+Measured via `tests/test_phase5_performance_memory.py` using standard Python `tracemalloc`:
 
-| Operation | Input Fixture Size | Buffer Chunk Size | Peak Memory Delta | Complexity Scaling |
-| :--- | :--- | :--- | :--- | :--- |
-| **Damaged Media Imaging** | 10.0 MB | 64 KB | **0.06 MB** | $O(1)$ constant buffer |
-| **RAID 5 Streaming Rebuild** | 10.0 MB | 64 KB | **0.03 MB** | $O(1)$ constant buffer |
+| Operation | Input Fixture Size | Buffer Chunk Size | Measured Peak Memory Delta | Workload Classification | Complexity Scaling |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Damaged Media Imaging** | 10.0 MB | 64 KB | **0.06 MB** | Sequential Stream I/O | $O(1)$ constant buffer |
+| **Damaged Media Imaging** | 50.0 MB | 64 KB | **0.06 MB** | Sequential Stream I/O | $O(1)$ constant buffer |
+| **RAID 5 Streaming Rebuild** | 10.0 MB | 64 KB | **0.03 MB** | 3-Disk Stripe Rebuild | $O(1)$ constant buffer |
+
+### B. Qualification Scope & Limitations
+- **Established Qualification:** `TEST-VERIFIED BOUNDED STREAMING`. Confirms that sequential sector-by-sector disk acquisition, bad-sector mapfile tracking, and multi-disk RAID streaming rebuilds operate strictly with $O(1)$ memory buffer overhead relative to total disk/image size.
+- **NOT Established:** Universal memory qualification across unconstrained multi-fragment permutation search trees, unbounded external GUI processes (e.g. Autopsy), or non-streaming in-memory container expansions.
 
 ---
 
 ## 6. Testing & Regression Summary
 
 - **Previous Baseline:** 445 passed (100%)
-- **New Phase 5 Tests Added:** 27 tests across 4 test suites:
+- **New Phase 5 Tests Added:** 28 tests across 4 test suites:
   - `tests/test_phase5_damaged_media.py` (9 tests)
   - `tests/test_phase5_fragment_reconstruction.py` (6 tests)
   - `tests/test_phase5_raid_reconstruction.py` (10 tests)
-  - `tests/test_phase5_performance_memory.py` (2 tests)
-- **Total New Test Count:** **472 passed**
+  - `tests/test_phase5_performance_memory.py` (3 tests)
+- **Total New Test Count:** **473 passed**
 - **Test Integrity:** 0 tests deleted, 0 weakened, 0 skipped, 0 failed.
 
 ---

@@ -15,7 +15,7 @@
 - **Source Commit:** `6f8b2a1`
 - **Source File:** `zipcarve.py`
 - **Original Symbol:** `ZipEntry.delta`
-- **Original License:** MIT License
+- **Original License:** Apache License 2.0 (Verified via upstream `LICENSE` file)
 - **License Status:** COMPATIBLE / NON-BLOCKING (Permissive open source)
 - **Copyright:** Copyright (c) 2024 AKHANDA Authors
 - **DREX Destination File:** `fragment_engine.py`
@@ -34,7 +34,7 @@
 - **Source Commit:** `6f8b2a1`
 - **Source File:** `reassemble.py`
 - **Original Symbol:** `validate_png_idat`
-- **Original License:** MIT License
+- **Original License:** Apache License 2.0 (Verified via upstream `LICENSE` file)
 - **License Status:** COMPATIBLE / NON-BLOCKING (Permissive open source)
 - **Copyright:** Copyright (c) 2024 AKHANDA Authors
 - **DREX Destination File:** `carver_engine.py`
