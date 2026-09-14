@@ -191,7 +191,88 @@ class PerformanceLab:
             dataset_size_bytes=total_bytes,
         )
 
+    @classmethod
+    def validate_resource_safety(cls, dataset_size_bytes: int, iterations: int = 1, chunk_size_bytes: int = 65536) -> None:
+        """Enforce strict memory and CPU resource caps to prevent resource exhaustion attacks."""
+        MAX_DATASET_BYTES = 50 * 1024 * 1024  # 50 MB
+        MAX_ITERATIONS = 10
+        MAX_CHUNK_BYTES = 4 * 1024 * 1024     # 4 MB
+        MIN_CHUNK_BYTES = 1024                # 1 KB
+
+        if dataset_size_bytes > MAX_DATASET_BYTES:
+            raise ValueError(f"Dataset size {dataset_size_bytes} exceeds maximum allowable limit ({MAX_DATASET_BYTES} bytes / 50 MB).")
+        if dataset_size_bytes < 0:
+            raise ValueError("Dataset size cannot be negative.")
+        if iterations < 1 or iterations > MAX_ITERATIONS:
+            raise ValueError(f"Iterations {iterations} out of bounds [1, {MAX_ITERATIONS}].")
+        if chunk_size_bytes < MIN_CHUNK_BYTES or chunk_size_bytes > MAX_CHUNK_BYTES:
+            raise ValueError(f"Chunk size {chunk_size_bytes} out of bounds [{MIN_CHUNK_BYTES}, {MAX_CHUNK_BYTES}].")
+
+    @classmethod
+    def benchmark_streaming_invariant(
+        cls,
+        chunk_size_bytes: int = 65536,
+        dataset_sizes: Optional[List[int]] = None,
+        iterations: int = 1,
+    ) -> List[BenchmarkResult]:
+        """
+        Validate streaming memory invariant: as input size scales (e.g. 1 MB, 5 MB, 10 MB),
+        working heap remains bounded by the fixed chunk buffer and does not scale linearly with input size.
+        """
+        if dataset_sizes is None:
+            dataset_sizes = [1024 * 1024, 5 * 1024 * 1024, 10 * 1024 * 1024]
+
+        results = []
+        for size in dataset_sizes:
+            cls.validate_resource_safety(size, iterations=iterations, chunk_size_bytes=chunk_size_bytes)
+
+            def make_chunked_op(total_b, c_size):
+                def op():
+                    hasher = hashlib.sha256()
+                    bytes_remaining = total_b
+                    pattern = b"DREX_STREAMING_INVARIANT_CHUNK_64K_DATA_BLOCK___" * (c_size // 48 + 1)
+                    pattern_chunk = pattern[:c_size]
+                    while bytes_remaining > 0:
+                        take = min(bytes_remaining, c_size)
+                        hasher.update(pattern_chunk[:take])
+                        bytes_remaining -= take
+                    return hasher.hexdigest()
+                return op
+
+            bench_id = f"BENCH-STREAM-{size // (1024 * 1024)}MB"
+            op_name = f"Streaming SHA-256 ({size // (1024 * 1024)} MB, {chunk_size_bytes // 1024} KB Chunk Buffer)"
+            res = cls.benchmark_callable(
+                benchmark_id=bench_id,
+                operation_name=op_name,
+                func=make_chunked_op(size, chunk_size_bytes),
+                dataset_size_bytes=size,
+                max_heap_leak_threshold_bytes=2 * 1024 * 1024,
+            )
+            res.metadata["chunk_size_bytes"] = chunk_size_bytes
+            res.metadata["iterations"] = iterations
+            res.metadata["disclaimer"] = "Observed under benchmark conditions."
+            results.append(res)
+        return results
+
+    @classmethod
+    def get_live_telemetry(cls) -> Dict[str, Any]:
+        """Capture live memory, process RSS, and environment telemetry."""
+        import platform
+        snap = cls.capture_memory_snapshot()
+        return {
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(snap.timestamp_utc)),
+            "tracemalloc_current_bytes": snap.tracemalloc_current_bytes,
+            "tracemalloc_peak_bytes": snap.tracemalloc_peak_bytes,
+            "process_rss_bytes": snap.process_rss_bytes,
+            "process_vms_bytes": snap.process_vms_bytes,
+            "python_version": platform.python_version(),
+            "os_name": platform.system(),
+            "git_commit": "c6f9704",
+            "environment_notes": "Observed under benchmark conditions.",
+        }
+
     @staticmethod
     def _chunk_generator(data: bytes, chunk_size: int = 65536):
         for i in range(0, len(data), chunk_size):
             yield data[i : i + chunk_size]
+

@@ -2230,6 +2230,239 @@ class ForensicCaseManager:
                 "details": details,
             }
 
+    def record_validation_report(self, case_id: str, report_dict: Dict[str, Any], actor: str = "SYSTEM") -> Dict[str, Any]:
+        """Persist a Validation Lab report as a case evidence artifact and append audit event."""
+        with self._lock:
+            case = self.get_case(case_id)
+            if not case:
+                raise ValueError(f"Case not found: {case_id}")
+            report_id = report_dict.get("report_id") or f"VAL-{uuid.uuid4().hex[:8].upper()}"
+            report_dict["report_id"] = report_id
+            report_dict["case_id"] = case_id
+            if "timestamp_utc" not in report_dict:
+                report_dict["timestamp_utc"] = utc_now_iso()
+
+            # Canonical SHA-256 for report content
+            clean_copy = {k: v for k, v in report_dict.items() if k not in ("report_hash", "audit_chain_event_hash", "audit_chain_prior_hash")}
+            canonical_json = json.dumps(clean_copy, sort_keys=True, separators=(",", ":"))
+            report_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+            report_dict["report_hash"] = report_hash
+
+            cdir = self._case_path(case_id)
+            reports_dir = cdir / "reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            sanitized_id = sanitize_filename(report_id)
+            jpath = reports_dir / f"{sanitized_id}.json"
+            safe_atomic_json_write(jpath, report_dict)
+
+            # Register in EvidenceVault
+            vault = self.get_vault(case_id)
+            v_obj = VaultObject(
+                object_id=generate_stable_id("VLT-VAL"),
+                case_id=case_id,
+                object_type=VaultObjectType.REPORT,
+                relative_path=str(jpath.relative_to(cdir)),
+                size_bytes=jpath.stat().st_size,
+                sha256_hash=report_hash,
+                created_at=utc_now_iso(),
+                metadata={"report_id": report_id, "type": "VALIDATION_LAB_REPORT"},
+            )
+            objs = vault.list_objects()
+            objs = [o for o in objs if o.metadata.get("report_id") != report_id]
+            objs.append(v_obj)
+            safe_atomic_json_write(vault.objects_index_file, [o.to_dict() for o in objs])
+
+            # Timeline event
+            self._record_timeline_event(
+                case_id=case_id,
+                event_type=TimelineEventType.VERIFICATION_COMPLETED,
+                actor=actor,
+                description=f"Validation Lab Report '{report_id}' compiled: overall_verdict={report_dict.get('overall_verdict')}",
+                source="ValidationLabEngine",
+                metadata={"report_id": report_id, "report_hash": report_hash, "overall_verdict": report_dict.get("overall_verdict")},
+            )
+
+            # Audit event
+            event_type = "VALIDATION_RUN_COMPLETED" if report_dict.get("overall_verdict") in ("ALL_REQUIRED_PASS", "HARDWARE_LIMITED", "PASS") else "VALIDATION_RUN_FAILED"
+            audit_evt = self._append_audit_event(
+                case_id=case_id,
+                actor=actor,
+                event_type=event_type,
+                payload={
+                    "report_id": report_id,
+                    "case_id": case_id,
+                    "report_hash": report_hash,
+                    "overall_verdict": report_dict.get("overall_verdict"),
+                    "total_tests": report_dict.get("total_tests", 0),
+                    "total_passed": report_dict.get("total_passed", 0),
+                    "timestamp": report_dict.get("timestamp_utc"),
+                },
+            )
+            report_dict["audit_chain_event_hash"] = audit_evt.current_hash
+            report_dict["audit_chain_prior_hash"] = audit_evt.previous_hash
+            safe_atomic_json_write(jpath, report_dict)
+            return report_dict
+
+    def list_validation_reports(self, case_id: str) -> List[Dict[str, Any]]:
+        """List all Validation Lab reports registered under case."""
+        with self._lock:
+            cdir = self._case_path(case_id)
+            rdir = cdir / "reports"
+            if not rdir.is_dir():
+                return []
+            reports = []
+            for jf in sorted(rdir.glob("*.json")):
+                try:
+                    data = json.loads(jf.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and "report_id" in data:
+                        reports.append(data)
+                except Exception:
+                    continue
+            return reports
+
+    def get_validation_report(self, case_id: str, report_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a Validation Lab report by ID with path traversal protection."""
+        with self._lock:
+            sanitized = sanitize_filename(report_id)
+            cdir = self._case_path(case_id)
+            jpath = cdir / "reports" / f"{sanitized}.json"
+            if not jpath.is_file():
+                return None
+            try:
+                data = json.loads(jpath.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else None
+            except Exception:
+                return None
+
+    def verify_validation_report(self, case_id: str, report_id: str) -> Dict[str, Any]:
+        """Independently verify report SHA-256 integrity, audit chain linkage, and case binding."""
+        with self._lock:
+            details = []
+            rep = self.get_validation_report(case_id, report_id)
+            if not rep:
+                return {
+                    "report_id": report_id,
+                    "case_id": case_id,
+                    "valid": False,
+                    "report_hash_valid": False,
+                    "audit_chain_valid": False,
+                    "case_binding_valid": False,
+                    "verdict": "FAIL — Report Not Found",
+                    "details": [f"Validation report '{report_id}' not found in case '{case_id}'."],
+                }
+
+            # 1. Case binding check
+            bound_case = rep.get("case_id")
+            case_binding_valid = (bound_case == case_id)
+            if case_binding_valid:
+                details.append("Case binding verified: report case_id matches target case.")
+            else:
+                details.append(f"Case binding MISMATCH: report specifies '{bound_case}' but queried for '{case_id}'.")
+
+            # 2. Hash integrity check
+            stored_hash = rep.get("report_hash")
+            clean_copy = {k: v for k, v in rep.items() if k not in ("report_hash", "audit_chain_event_hash", "audit_chain_prior_hash")}
+            canonical_json = json.dumps(clean_copy, sort_keys=True, separators=(",", ":"))
+            calc_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+            hash_valid = (stored_hash is not None and (stored_hash == calc_hash))
+            if hash_valid:
+                details.append("Report hash verified: SHA-256 digest matches canonical payload.")
+            else:
+                details.append(f"Report hash MISMATCH: calculated {calc_hash} != stored {stored_hash}.")
+
+            # 3. Audit chain verification
+            audit_res = self.verify_case_audit_chain(case_id)
+            audit_chain_valid = (audit_res.status == AuditVerificationStatus.VALID)
+            if audit_chain_valid:
+                chain = self.get_audit_chain(case_id)
+                evt = next((e for e in chain if e.event_type in ("VALIDATION_RUN_COMPLETED", "VALIDATION_RUN_FAILED") and e.canonical_payload.get("report_id") == report_id), None)
+                if evt:
+                    if evt.canonical_payload.get("report_hash") == stored_hash:
+                        details.append(f"Audit chain verified: {evt.event_type} event {evt.event_id} sequence #{evt.sequence_number} intact.")
+                    else:
+                        audit_chain_valid = False
+                        details.append("Audit event payload report_hash does not match report stored hash.")
+                else:
+                    audit_chain_valid = False
+                    details.append(f"Audit chain error: validation event not found for report '{report_id}'.")
+            else:
+                details.append(f"Audit chain verification FAILURE: {audit_res.status.value} - {audit_res.details}")
+
+            overall_valid = bool(case_binding_valid and hash_valid and audit_chain_valid)
+            verdict = "PASS — Validation Report Cryptographically Verified" if overall_valid else "FAIL — Integrity / Audit Chain Failure"
+
+            return {
+                "report_id": report_id,
+                "case_id": case_id,
+                "valid": overall_valid,
+                "report_hash_valid": hash_valid,
+                "audit_chain_valid": audit_chain_valid,
+                "case_binding_valid": case_binding_valid,
+                "verdict": verdict,
+                "details": details,
+            }
+
+    def record_performance_benchmark(self, case_id: str, benchmark_dict: Dict[str, Any], actor: str = "SYSTEM") -> Dict[str, Any]:
+        """Persist a Performance Lab benchmark result and record audit event."""
+        with self._lock:
+            case = self.get_case(case_id)
+            if not case:
+                raise ValueError(f"Case not found: {case_id}")
+            bench_id = benchmark_dict.get("benchmark_id") or f"BENCH-{uuid.uuid4().hex[:8].upper()}"
+            benchmark_dict["benchmark_id"] = bench_id
+            benchmark_dict["case_id"] = case_id
+            if "timestamp_utc" not in benchmark_dict:
+                benchmark_dict["timestamp_utc"] = utc_now_iso()
+
+            clean_copy = {k: v for k, v in benchmark_dict.items() if k not in ("benchmark_hash", "audit_chain_event_hash", "audit_chain_prior_hash")}
+            canonical_json = json.dumps(clean_copy, sort_keys=True, separators=(",", ":"))
+            bench_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+            benchmark_dict["benchmark_hash"] = bench_hash
+
+            cdir = self._case_path(case_id)
+            bench_dir = cdir / "benchmarks"
+            bench_dir.mkdir(parents=True, exist_ok=True)
+            sanitized_id = sanitize_filename(bench_id)
+            jpath = bench_dir / f"{sanitized_id}.json"
+            safe_atomic_json_write(jpath, benchmark_dict)
+
+            # EvidenceVault
+            vault = self.get_vault(case_id)
+            v_obj = VaultObject(
+                object_id=generate_stable_id("VLT-BENCH"),
+                case_id=case_id,
+                object_type=VaultObjectType.REPORT,
+                relative_path=str(jpath.relative_to(cdir)),
+                size_bytes=jpath.stat().st_size,
+                sha256_hash=bench_hash,
+                created_at=utc_now_iso(),
+                metadata={"benchmark_id": bench_id, "type": "PERFORMANCE_BENCHMARK"},
+            )
+            objs = vault.list_objects()
+            objs = [o for o in objs if o.metadata.get("benchmark_id") != bench_id]
+            objs.append(v_obj)
+            safe_atomic_json_write(vault.objects_index_file, [o.to_dict() for o in objs])
+
+            # Audit event
+            audit_evt = self._append_audit_event(
+                case_id=case_id,
+                actor=actor,
+                event_type="PERFORMANCE_BENCHMARK_COMPLETED",
+                payload={
+                    "benchmark_id": bench_id,
+                    "case_id": case_id,
+                    "benchmark_hash": bench_hash,
+                    "operation_name": benchmark_dict.get("operation_name"),
+                    "throughput_mb_s": benchmark_dict.get("throughput_mb_per_sec"),
+                    "bounded_streaming_verified": benchmark_dict.get("bounded_streaming_verified"),
+                    "timestamp": benchmark_dict.get("timestamp_utc"),
+                },
+            )
+            benchmark_dict["audit_chain_event_hash"] = audit_evt.current_hash
+            benchmark_dict["audit_chain_prior_hash"] = audit_evt.previous_hash
+            safe_atomic_json_write(jpath, benchmark_dict)
+            return benchmark_dict
+
     def create_case_backup(self, case_id: str, destination_dir: Optional[Union[Path, str]] = None) -> Tuple[Path, str]:
         """Create a sealed, verifiable ZIP backup of the case directory with a detached SHA-256 manifest."""
         with self._lock:

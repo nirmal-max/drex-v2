@@ -571,6 +571,426 @@ async function verifyCertificateAction(caseId, certId) {
   }
 }
 
+// ─── Phase 14: Validation Lab & Performance Lab Views ────────────────────────
+
+function renderValidationLab() {
+  return `
+    <div class="card">
+      <div class="section-label">ASSURANCE & GROUND TRUTH VALIDATION</div>
+      <h2 class="card-title">Validation Laboratory & 25-Method KAT Verification</h2>
+      <p style="color: var(--drex-text-muted); font-size: 13px; margin-top: 6px;">
+        Authoritative server-side Known-Answer Test (KAT) engine. Evaluates recovery ground-truth fixtures, sanitization entropy models, hardware qualification safety tripwires, and resource-bounded stress.
+      </p>
+      <div style="display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap;">
+        <button class="action-btn" style="width: auto;" onclick="runValidationLabSuite()">⚡ Run Authoritative Validation Suites</button>
+        <button class="action-btn" style="width: auto; background: var(--drex-bg-surface-subtle); color: var(--drex-text-main); border: 1px solid var(--drex-border);" onclick="loadValidationReports()">🔄 Refresh Reports</button>
+      </div>
+      <div id="valRunStatus" style="display: none; margin-top: 12px; padding: 10px; border-radius: 4px; font-size: 12px;"></div>
+    </div>
+
+    <div class="card" style="margin-top: 16px;">
+      <div class="section-label">ACTIVE VALIDATION REPORT</div>
+      <h3 class="card-title" id="valReportTitle">No Validation Report Loaded</h3>
+      <div id="valReportContent" style="margin-top: 12px; font-size: 12px; color: var(--drex-text-muted);">
+        Click <strong>Run Authoritative Validation Suites</strong> to generate an authenticated evidence report sealed with SHA-256 audit hashing.
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px;">
+      <div class="section-label">HISTORICAL CASE VALIDATION REPORTS</div>
+      <h3 class="card-title">Persisted Validation Reports</h3>
+      <div id="valReportsList" style="margin-top: 12px;">
+        <div style="color: var(--drex-text-muted); font-size: 12px;">Loading reports...</div>
+      </div>
+    </div>
+  `;
+}
+
+async function runValidationLabSuite() {
+  const statusBox = document.getElementById('valRunStatus');
+  if (statusBox) {
+    statusBox.style.display = 'block';
+    statusBox.style.background = '#eff6ff';
+    statusBox.style.color = '#1d4ed8';
+    statusBox.style.border = '1px solid #bfdbfe';
+    statusBox.innerHTML = '<em>Running server-side Known-Answer validation suites and hardware safety tripwires...</em>';
+  }
+
+  try {
+    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001';
+    const res = await api('/api/validation/run', {
+      method: 'POST',
+      body: JSON.stringify({
+        case_id: caseId,
+        suites: ['SUITE-KAT-REC', 'SUITE-KAT-SAN', 'SUITE-HW-SAFETY', 'SUITE-STRESS', 'SUITE-PERF'],
+      }),
+    });
+
+    if (statusBox) {
+      statusBox.style.background = '#ecfdf5';
+      statusBox.style.color = '#065f46';
+      statusBox.style.border = '1px solid #10b981';
+      statusBox.innerHTML = `✓ Validation Lab Executed: <strong>${esc(res.overall_verdict)}</strong> (${res.total_passed}/${res.total_tests} tests passed across ${res.total_suites} suites, ${res.duration_seconds}s). Report ID: <code>${esc(res.report_id)}</code>`;
+    }
+
+    displayValidationReport(res);
+    await loadValidationReports();
+  } catch (ex) {
+    if (statusBox) {
+      statusBox.style.background = '#fef2f2';
+      statusBox.style.color = '#991b1b';
+      statusBox.style.border = '1px solid #ef4444';
+      statusBox.innerHTML = `✕ Execution Failed: ${esc(ex.message || String(ex))}`;
+    }
+  }
+}
+
+function displayValidationReport(r) {
+  const title = document.getElementById('valReportTitle');
+  const content = document.getElementById('valReportContent');
+  if (!title || !content) return;
+
+  const verdictBadge = r.overall_verdict === 'ALL_REQUIRED_PASS'
+    ? '<span class="badge badge-pass">ALL REQUIRED PASS</span>'
+    : (r.overall_verdict === 'HARDWARE_LIMITED'
+      ? '<span class="badge" style="background:#fef3c7;color:#92400e;border:1px solid #fde68a;">HARDWARE LIMITED (TRUTHFUL)</span>'
+      : '<span class="badge badge-fail">FAILED</span>');
+
+  title.innerHTML = `Report: ${esc(r.report_id)} &middot; ${verdictBadge}`;
+
+  let html = `
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px;">
+      <div style="background: var(--drex-bg-surface-subtle); padding: 10px; border-radius: 4px;">
+        <div style="font-size: 10px; color: var(--drex-text-muted);">TOTAL TESTS</div>
+        <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">${r.total_passed} / ${r.total_tests}</div>
+      </div>
+      <div style="background: var(--drex-bg-surface-subtle); padding: 10px; border-radius: 4px;">
+        <div style="font-size: 10px; color: var(--drex-text-muted);">SUITES EVALUATED</div>
+        <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">${r.suites_passed} / ${r.total_suites}</div>
+      </div>
+      <div style="background: var(--drex-bg-surface-subtle); padding: 10px; border-radius: 4px;">
+        <div style="font-size: 10px; color: var(--drex-text-muted);">EXECUTION TIME</div>
+        <div style="font-size: 18px; font-weight: 700; margin-top: 4px;">${r.duration_seconds}s</div>
+      </div>
+      <div style="background: var(--drex-bg-surface-subtle); padding: 10px; border-radius: 4px;">
+        <div style="font-size: 10px; color: var(--drex-text-muted);">AUDIT HASH</div>
+        <div style="font-size: 11px; font-family: var(--drex-font-mono); margin-top: 4px; overflow: hidden; text-overflow: ellipsis;">${esc((r.report_hash || '').substring(0, 16))}...</div>
+      </div>
+    </div>
+
+    <h4 style="font-size: 13px; margin: 12px 0 6px;">Evaluated Test Suites</h4>
+    <table class="table" style="font-size: 11px; margin-bottom: 16px;">
+      <thead>
+        <tr>
+          <th>Suite ID</th>
+          <th>Name</th>
+          <th>Passed / Total</th>
+          <th>Duration</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${(r.suite_summaries || []).map(s => `
+          <tr>
+            <td><code>${esc(s.suite_id)}</code></td>
+            <td><strong>${esc(s.suite_name)}</strong></td>
+            <td>${s.passed_tests} / ${s.total_tests}</td>
+            <td>${s.duration_seconds}s</td>
+            <td><span class="badge ${s.status === 'PASS' ? 'badge-pass' : 'badge-fail'}">${esc(s.status)}</span></td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+
+    <h4 style="font-size: 13px; margin: 12px 0 6px;">25-Method Known-Answer Truth Matrix</h4>
+    <div style="max-height: 280px; overflow-y: auto; border: 1px solid var(--drex-border); border-radius: 4px;">
+      <table class="table" style="font-size: 11px;">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Method Name</th>
+            <th>Category</th>
+            <th>Software Algorithm</th>
+            <th>Hardware Requirement</th>
+            <th>Physical Execution</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${(r.method_matrix || []).map(m => {
+            const badgeClass = m.truth_status === 'KAT_VERIFIED' ? 'badge-pass' : (m.truth_status.includes('PARTIAL') ? 'badge-warn' : 'badge-fail');
+            return `
+              <tr>
+                <td><strong>M${String(m.method_id).padStart(2, '0')}</strong></td>
+                <td>${esc(m.method_name)}</td>
+                <td><span style="font-size: 10px; color: var(--drex-text-muted);">${esc(m.category)}</span></td>
+                <td><span class="badge ${badgeClass}">${esc(m.software_status || m.truth_status)}</span></td>
+                <td><code>${esc(m.hardware_status || 'SOFTWARE_QUALIFIED')}</code></td>
+                <td><span style="font-size: 10px; color: var(--drex-text-muted); font-weight: 600;">${esc(m.physical_execution || 'NOT_EXECUTED')}</span></td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="margin-top: 10px; font-size: 11px; color: var(--drex-text-muted); font-style: italic;">
+      * ${esc(r.disclaimer || 'Observed under benchmark and synthetic fixture conditions. Physical hardware execution: NOT_EXECUTED.')}
+    </div>
+  `;
+
+  content.innerHTML = html;
+}
+
+async function loadValidationReports() {
+  const listEl = document.getElementById('valReportsList');
+  if (!listEl) return;
+
+  try {
+    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : '';
+    const query = caseId ? `?case_id=${encodeURIComponent(caseId)}` : '';
+    const reports = await api(`/api/validation/reports${query}`);
+
+    if (!reports || reports.length === 0) {
+      listEl.innerHTML = '<div style="color: var(--drex-text-muted); font-size: 12px;">No validation reports registered in case vault yet.</div>';
+      return;
+    }
+
+    listEl.innerHTML = `
+      <table class="table" style="font-size: 11px;">
+        <thead>
+          <tr>
+            <th>Report ID</th>
+            <th>Timestamp</th>
+            <th>Verdict</th>
+            <th>Tests</th>
+            <th>Hash Integrity</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${reports.map(r => `
+            <tr>
+              <td><code>${esc(r.report_id)}</code></td>
+              <td>${esc(r.timestamp_utc)}</td>
+              <td><strong>${esc(r.overall_verdict)}</strong></td>
+              <td>${r.total_passed} / ${r.total_tests}</td>
+              <td style="font-family: var(--drex-font-mono); font-size: 10px;">${esc((r.report_hash || '').substring(0, 12))}...</td>
+              <td>
+                <button class="action-btn" style="width: auto; padding: 3px 8px; font-size: 10px;" onclick="verifyValidationReport('${esc(r.case_id || '')}', '${esc(r.report_id)}')">🛡 Verify Integrity</button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      <div id="valVerifyResult" style="display: none; margin-top: 10px; padding: 10px; border-radius: 4px; font-size: 11px;"></div>
+    `;
+  } catch (ex) {
+    listEl.innerHTML = `<div style="color: var(--drex-status-fail); font-size: 12px;">Failed to load validation reports: ${esc(ex.message)}</div>`;
+  }
+}
+
+async function verifyValidationReport(caseId, reportId) {
+  const resBox = document.getElementById('valVerifyResult');
+  if (resBox) {
+    resBox.style.display = 'block';
+    resBox.style.background = '#eff6ff';
+    resBox.style.color = '#1d4ed8';
+    resBox.innerHTML = '<em>Recalculating canonical SHA-256 and verifying case audit chain...</em>';
+  }
+
+  try {
+    const cId = caseId || ((STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001');
+    const res = await api('/api/validation/verify', {
+      method: 'POST',
+      body: JSON.stringify({ case_id: cId, report_id: reportId }),
+    });
+
+    if (resBox) {
+      if (res.valid) {
+        resBox.style.background = '#ecfdf5';
+        resBox.style.color = '#065f46';
+        resBox.style.border = '1px solid #10b981';
+        resBox.innerHTML = `<strong>✓ ${esc(res.verdict)}</strong><br><span style="font-size: 10px;">Report Hash: ${res.report_hash_valid ? 'VALID' : 'INVALID'} &middot; Audit Chain: ${res.audit_chain_valid ? 'VALID' : 'INVALID'} &middot; Case Binding: ${res.case_binding_valid ? 'VALID' : 'INVALID'}</span>`;
+      } else {
+        resBox.style.background = '#fef2f2';
+        resBox.style.color = '#991b1b';
+        resBox.style.border = '1px solid #ef4444';
+        resBox.innerHTML = `<strong>✕ ${esc(res.verdict)}</strong><br><span style="font-size: 10px;">${res.details.map(d => `&bull; ${esc(d)}`).join('<br>')}</span>`;
+      }
+    }
+  } catch (ex) {
+    if (resBox) {
+      resBox.style.background = '#fef2f2';
+      resBox.style.color = '#991b1b';
+      resBox.innerHTML = `Verification error: ${esc(ex.message)}`;
+    }
+  }
+}
+
+function renderPerformanceLab() {
+  return `
+    <div class="card">
+      <div class="section-label">THROUGHPUT & MEMORY PROFILING</div>
+      <h2 class="card-title">Performance Laboratory & Dual-Signal Telemetry</h2>
+      <p style="color: var(--drex-text-muted); font-size: 13px; margin-top: 6px;">
+        High-resolution throughput benchmarking and dual-signal memory profiling. Distinguishes Python heap allocation (<code>tracemalloc</code>) from OS process physical resident memory (<code>Working Set / RSS</code>).
+      </p>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 14px;">
+        <div>
+          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">DATASET SIZE (MAX 50 MB)</label>
+          <select id="perfDatasetSize" class="safety-input" style="margin-top: 4px; padding: 6px;">
+            <option value="1048576">1 MB (1,048,576 Bytes)</option>
+            <option value="5242880" selected>5 MB (5,242,880 Bytes)</option>
+            <option value="10485760">10 MB (10,485,760 Bytes)</option>
+            <option value="52428800">50 MB (52,428,800 Bytes)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">CHUNK SIZE</label>
+          <select id="perfChunkSize" class="safety-input" style="margin-top: 4px; padding: 6px;">
+            <option value="65536" selected>64 KB Chunk Buffer</option>
+            <option value="131072">128 KB Chunk Buffer</option>
+            <option value="1048576">1 MB Chunk Buffer</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">ITERATIONS (MAX 10)</label>
+          <input type="number" id="perfIterations" class="safety-input" value="1" min="1" max="10" style="margin-top: 4px; padding: 6px;">
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 10px; margin-top: 14px;">
+        <button class="action-btn" style="width: auto;" onclick="runPerformanceBenchmark()">🚀 Run Streaming Benchmark</button>
+        <button class="action-btn" style="width: auto; background: var(--drex-bg-surface-subtle); color: var(--drex-text-main); border: 1px solid var(--drex-border);" onclick="loadPerformanceTelemetry()">📡 Query Live Telemetry</button>
+      </div>
+      <div id="perfRunStatus" style="display: none; margin-top: 12px; padding: 10px; border-radius: 4px; font-size: 12px;"></div>
+    </div>
+
+    <div class="card" style="margin-top: 16px;">
+      <div class="section-label">LIVE DUAL-SIGNAL MEMORY TELEMETRY</div>
+      <h3 class="card-title">Process & Heap Telemetry</h3>
+      <div id="perfTelemetryGrid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 12px;">
+        <div style="background: var(--drex-bg-surface-subtle); padding: 12px; border-radius: 4px;">
+          <div style="font-size: 10px; color: var(--drex-text-muted);">HEAP CURRENT (TRACEMALLOC)</div>
+          <div id="tmCurrent" style="font-size: 16px; font-weight: 700; margin-top: 4px;">--</div>
+        </div>
+        <div style="background: var(--drex-bg-surface-subtle); padding: 12px; border-radius: 4px;">
+          <div style="font-size: 10px; color: var(--drex-text-muted);">HEAP PEAK (TRACEMALLOC)</div>
+          <div id="tmPeak" style="font-size: 16px; font-weight: 700; margin-top: 4px;">--</div>
+        </div>
+        <div style="background: var(--drex-bg-surface-subtle); padding: 12px; border-radius: 4px;">
+          <div style="font-size: 10px; color: var(--drex-text-muted);">PROCESS RSS (WORKING SET)</div>
+          <div id="osRss" style="font-size: 16px; font-weight: 700; margin-top: 4px;">--</div>
+        </div>
+        <div style="background: var(--drex-bg-surface-subtle); padding: 12px; border-radius: 4px;">
+          <div style="font-size: 10px; color: var(--drex-text-muted);">STREAMING INVARIANT</div>
+          <div style="font-size: 14px; font-weight: 700; color: #10b981; margin-top: 4px;">BOUNDED (O(1))</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px;">
+      <div class="section-label">BENCHMARK EXECUTION RESULTS</div>
+      <h3 class="card-title">Last Benchmark Run</h3>
+      <div id="perfBenchmarkResults" style="margin-top: 12px; font-size: 12px; color: var(--drex-text-muted);">
+        Click <strong>Run Streaming Benchmark</strong> to measure IO throughput and bounded streaming behavior.
+      </div>
+    </div>
+  `;
+}
+
+async function loadPerformanceTelemetry() {
+  try {
+    const tel = await api('/api/performance/telemetry');
+    const curEl = document.getElementById('tmCurrent');
+    const peakEl = document.getElementById('tmPeak');
+    const rssEl = document.getElementById('osRss');
+
+    if (curEl) curEl.textContent = formatBytes(tel.tracemalloc_current_bytes);
+    if (peakEl) peakEl.textContent = formatBytes(tel.tracemalloc_peak_bytes);
+    if (rssEl) rssEl.textContent = formatBytes(tel.process_rss_bytes);
+  } catch (ex) {
+    console.warn('Failed to query performance telemetry:', ex);
+  }
+}
+
+async function runPerformanceBenchmark() {
+  const statusBox = document.getElementById('perfRunStatus');
+  const resultsBox = document.getElementById('perfBenchmarkResults');
+
+  const datasetSize = parseInt(document.getElementById('perfDatasetSize').value, 10);
+  const chunkSize = parseInt(document.getElementById('perfChunkSize').value, 10);
+  const iterations = parseInt(document.getElementById('perfIterations').value, 10);
+
+  if (statusBox) {
+    statusBox.style.display = 'block';
+    statusBox.style.background = '#eff6ff';
+    statusBox.style.color = '#1d4ed8';
+    statusBox.innerHTML = '<em>Running streaming IO benchmark under dual-signal memory profiling...</em>';
+  }
+
+  try {
+    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001';
+    const res = await api('/api/performance/run', {
+      method: 'POST',
+      body: JSON.stringify({
+        case_id: caseId,
+        dataset_size_bytes: datasetSize,
+        chunk_size_bytes: chunkSize,
+        iterations: iterations,
+      }),
+    });
+
+    if (statusBox) {
+      statusBox.style.background = '#ecfdf5';
+      statusBox.style.color = '#065f46';
+      statusBox.innerHTML = `✓ Benchmark Completed: <strong>${res.throughput_mb_per_sec} MB/s</strong> (${formatBytes(res.dataset_size_bytes)} in ${res.duration_seconds}s). Bounded Streaming: <strong>${res.bounded_streaming_verified ? 'VERIFIED' : 'FAILED'}</strong>`;
+    }
+
+    if (resultsBox) {
+      resultsBox.innerHTML = `
+        <table class="table" style="font-size: 11px;">
+          <thead>
+            <tr>
+              <th>Operation</th>
+              <th>Dataset</th>
+              <th>Duration</th>
+              <th>Throughput</th>
+              <th>Peak Heap</th>
+              <th>Process RSS</th>
+              <th>Streaming Invariant</th>
+              <th>Audit Hash</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>${esc(res.operation_name)}</strong></td>
+              <td>${formatBytes(res.dataset_size_bytes)}</td>
+              <td>${res.duration_seconds}s</td>
+              <td><strong style="color: #10b981;">${res.throughput_mb_per_sec} MB/s</strong></td>
+              <td>${formatBytes(res.tracemalloc_peak_bytes)}</td>
+              <td>${formatBytes(res.process_rss_bytes)}</td>
+              <td><span class="badge ${res.bounded_streaming_verified ? 'badge-pass' : 'badge-fail'}">${res.bounded_streaming_verified ? 'BOUNDED' : 'UNBOUNDED'}</span></td>
+              <td style="font-family: var(--drex-font-mono); font-size: 10px;">${esc((res.benchmark_hash || '').substring(0, 12))}...</td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="margin-top: 8px; font-size: 10px; color: var(--drex-text-muted);">
+          * Observed under benchmark conditions.
+        </div>
+      `;
+    }
+
+    await loadPerformanceTelemetry();
+  } catch (ex) {
+    if (statusBox) {
+      statusBox.style.background = '#fef2f2';
+      statusBox.style.color = '#991b1b';
+      statusBox.innerHTML = `✕ Benchmark Failed: ${esc(ex.message || String(ex))}`;
+    }
+  }
+}
+
 function renderGeneric(viewId) {
   const title = VIEW_TITLES[viewId] || 'Forensic Workstation Module';
   return `
@@ -612,6 +1032,8 @@ function navigateTo(viewId) {
     case 'methods': viewport.innerHTML = render25Methods(); break;
     case 'cases': viewport.innerHTML = renderCases(); break;
     case 'certificates': viewport.innerHTML = renderCertificates(); loadCertificates(); break;
+    case 'validation_lab': viewport.innerHTML = renderValidationLab(); loadValidationReports(); break;
+    case 'performance_lab': viewport.innerHTML = renderPerformanceLab(); loadPerformanceTelemetry(); break;
     case 'drive_eraser': viewport.innerHTML = renderDriveEraser(); break;
     case 'recovery':
     case 'carving': viewport.innerHTML = renderRecovery(); break;

@@ -69,7 +69,8 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "certificates:read", "certificates:issue", "certificates:verify",
         "reports:generate",
         "workstations:read", "diagnostics:read",
-        "validation:run", "performance:run",
+        "validation:run", "validation:read",
+        "performance:run", "performance:read",
         "demo:run",
     },
     UserRole.FORENSIC_ANALYST: {
@@ -87,7 +88,8 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "certificates:read", "certificates:issue", "certificates:verify",
         "reports:generate",
         "diagnostics:read",
-        "validation:run",
+        "validation:run", "validation:read",
+        "performance:run", "performance:read",
         "demo:run",
     },
     UserRole.INVESTIGATOR: {
@@ -102,6 +104,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "vault:read",
         "certificates:read", "certificates:verify",
         "reports:generate",
+        "validation:read", "performance:read",
         "demo:run",
     },
     UserRole.OPERATOR: {
@@ -114,6 +117,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "verification:verify", "verification:entropy",
         "certificates:read",
         "reports:generate",
+        "validation:read", "performance:read",
         "demo:run",
     },
     UserRole.AUDITOR: {
@@ -126,6 +130,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "vault:read",
         "certificates:read", "certificates:verify",
         "reports:generate",
+        "validation:read", "performance:read",
         "demo:run",
     },
     UserRole.JUDGE_DEMO: {
@@ -143,7 +148,8 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "certificates:read", "certificates:issue", "certificates:verify",
         "reports:generate",
         "diagnostics:read",
-        "validation:run", "performance:run",
+        "validation:run", "validation:read",
+        "performance:run", "performance:read",
         "demo:run",
     },
 }

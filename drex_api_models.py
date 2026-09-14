@@ -415,3 +415,126 @@ class CertificateVerifyResponse(BaseModel):
     details: List[str] = Field(default_factory=list)
 
 
+# ─── Validation & Performance Lab Models ──────────────────────────────────────
+
+class ValidationRunRequest(BaseModel):
+    case_id: str
+    suites: Optional[List[str]] = None
+    examiner: Optional[str] = None
+
+
+class MethodKatStatusItem(BaseModel):
+    method_id: int
+    method_name: str
+    category: str
+    truth_status: str = "KAT_VERIFIED"
+    software_status: str = "KAT_VERIFIED"
+    hardware_status: str = "SOFTWARE_QUALIFIED"
+    physical_execution: str = "NOT_EXECUTED"
+    kat_status: Optional[str] = None
+    algorithm_valid: Optional[bool] = None
+    physical_hardware_tested: bool = False
+    details: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ValidationSuiteResultModel(BaseModel):
+    suite_id: str
+    suite_name: str
+    total_tests: int
+    passed_tests: int
+    failed_tests: int
+    skipped_tests: int = 0
+    hardware_limited_tests: int = 0
+    duration_seconds: float
+    status: str  # "PASS", "PARTIAL", "FAIL", "HARDWARE_LIMITED"
+    diagnostics: List[str] = Field(default_factory=list)
+
+
+class ValidationLabReportModel(BaseModel):
+    report_id: str
+    case_id: str
+    timestamp_utc: str
+    overall_verdict: str  # "ALL_REQUIRED_PASS", "PARTIAL", "FAILED", "HARDWARE_LIMITED", "ERROR"
+    total_suites: int
+    total_tests: int
+    total_passed: int
+    total_failed: int
+    total_skipped: int = 0
+    duration_seconds: float
+    report_hash: Optional[str] = None
+    audit_chain_event_hash: Optional[str] = None
+    audit_chain_prior_hash: Optional[str] = None
+    suite_summaries: List[ValidationSuiteResultModel] = Field(default_factory=list)
+    method_matrix: List[MethodKatStatusItem] = Field(default_factory=list)
+    benchmarks: List[Dict[str, Any]] = Field(default_factory=list)
+    environment: Dict[str, Any] = Field(default_factory=dict)
+    disclaimer: str = "Observed under benchmark and synthetic fixture conditions. Physical hardware execution: NOT_EXECUTED."
+    vault_object_id: Optional[str] = None
+    audit_event_id: Optional[str] = None
+    report_sha256: Optional[str] = None
+
+
+class ValidationReportVerifyRequest(BaseModel):
+    case_id: str
+    report_id: str
+
+
+class ValidationReportVerifyResponse(BaseModel):
+    report_id: str
+    case_id: str
+    valid: bool
+    report_hash_valid: bool
+    audit_chain_valid: bool
+    case_binding_valid: bool
+    verdict: str
+    details: List[str] = Field(default_factory=list)
+
+
+class PerformanceRunRequest(BaseModel):
+    case_id: str
+    benchmark_type: str = "STREAMING_SHA256"
+    dataset_size_bytes: int = Field(5242880, ge=1024, le=52428800)  # Max 50 MB
+    chunk_size_bytes: int = Field(65536, ge=4096, le=1048576)      # 4 KB to 1 MB
+    iterations: int = Field(1, ge=1, le=10)                         # Max 10 iterations
+
+
+class PerformanceResultModel(BaseModel):
+    benchmark_id: str
+    case_id: str
+    operation_name: str
+    dataset_size_bytes: int
+    chunk_size_bytes: int = 65536
+    iterations: int = 1
+    duration_seconds: float
+    throughput_mb_per_sec: float
+    tracemalloc_current_bytes: int = 0
+    tracemalloc_peak_bytes: int = 0
+    process_rss_bytes: int = 0
+    process_vms_bytes: int = 0
+    bounded_streaming_verified: bool = True
+    benchmark_hash: Optional[str] = None
+    audit_chain_event_hash: Optional[str] = None
+    audit_chain_prior_hash: Optional[str] = None
+    environment_info: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    timestamp_utc: str
+    vault_object_id: Optional[str] = None
+    audit_event_id: Optional[str] = None
+    disclaimer: str = "Observed under benchmark conditions."
+
+
+class PerformanceTelemetryModel(BaseModel):
+    process_rss_bytes: int
+    process_vms_bytes: int
+    tracemalloc_current_bytes: int
+    tracemalloc_peak_bytes: int
+    timestamp_utc: str
+    python_version: Optional[str] = None
+    os_name: Optional[str] = None
+    git_commit: Optional[str] = None
+    environment_notes: Optional[str] = None
+
+
+
+

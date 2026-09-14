@@ -106,6 +106,9 @@ from certificate_engine import (
     CertificateVerificationInfo,
     CertificateTruthModel,
 )
+import dataclasses
+from validation_lab import ValidationLabEngine, ValidationLabReport, build_method_truth_matrix
+from performance_lab import PerformanceLab, BenchmarkResult
 
 
 # ─── Application Initialization ───────────────────────────────────────────────
@@ -2012,6 +2015,346 @@ def verify_certificate_endpoint(
         operation_binding_valid=res["operation_binding_valid"],
         verdict=res["verdict"],
         details=res["details"],
+    )
+
+
+# ─── Phase 14: Validation Laboratory Endpoints ──────────────────────────────
+
+@app.post("/api/validation/run", response_model=models.ValidationLabReportModel)
+def run_validation_lab_endpoint(
+    req: models.ValidationRunRequest,
+    current_user: Dict[str, Any] = Depends(require_permission("validation:run")),
+):
+    """
+    Execute authoritative Validation Laboratory test suites, record to Evidence Vault,
+    and seal within cryptographic SHA-256 case audit ledger.
+    """
+    case = case_manager.get_case(req.case_id)
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{req.case_id}' not found.")
+
+    # Log audit event: VALIDATION_RUN_STARTED
+    case_manager._append_audit_event(
+        case_id=req.case_id,
+        actor=current_user["display_name"],
+        event_type="VALIDATION_RUN_STARTED",
+        payload={"case_id": req.case_id, "suites_requested": req.suites, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+    )
+
+    # Execute ValidationLabEngine (Authoritative server-side run - anti-cheating enforced)
+    report = ValidationLabEngine.run_all_suites()
+    report_dict = dataclasses.asdict(report)
+
+    # Persist report in Evidence Vault and complete audit event
+    persisted = case_manager.record_validation_report(
+        case_id=req.case_id,
+        report_dict=report_dict,
+        actor=current_user["display_name"],
+    )
+
+    # Build response model
+    suite_models = [
+        models.ValidationSuiteResultModel(
+            suite_id=s["suite_id"],
+            suite_name=s["suite_name"],
+            total_tests=s["total_tests"],
+            passed_tests=s["passed_tests"],
+            failed_tests=s["failed_tests"],
+            duration_seconds=s["duration_seconds"],
+            status=s["status"],
+            diagnostics=s.get("diagnostics", []),
+        )
+        for s in persisted.get("suite_summaries", [])
+    ]
+
+    method_models = [
+        models.MethodKatStatusItem(
+            method_id=m["method_id"],
+            method_name=m["method_name"],
+            category=m["category"],
+            truth_status=m["truth_status"],
+            software_status=m.get("software_status", "KAT_VERIFIED"),
+            hardware_status=m.get("hardware_status", "SOFTWARE_QUALIFIED"),
+            physical_execution=m.get("physical_execution", "NOT_EXECUTED"),
+            notes=m.get("notes", ""),
+        )
+        for m in persisted.get("method_matrix", [])
+    ]
+
+    return models.ValidationLabReportModel(
+        report_id=persisted["report_id"],
+        case_id=req.case_id,
+        timestamp_utc=persisted["timestamp_utc"],
+        overall_verdict=persisted["overall_verdict"],
+        total_suites=persisted["total_suites"],
+        suites_passed=persisted["suites_passed"],
+        suites_failed=persisted["suites_failed"],
+        total_tests=persisted["total_tests"],
+        total_passed=persisted["total_passed"],
+        total_failed=persisted["total_failed"],
+        duration_seconds=persisted["duration_seconds"],
+        report_hash=persisted.get("report_hash", ""),
+        audit_chain_event_hash=persisted.get("audit_chain_event_hash", ""),
+        audit_chain_prior_hash=persisted.get("audit_chain_prior_hash", ""),
+        suite_summaries=suite_models,
+        method_matrix=method_models,
+        benchmarks=persisted.get("benchmarks", []),
+        environment=persisted.get("environment", {}),
+        disclaimer=persisted.get("disclaimer", "Observed under benchmark and synthetic fixture conditions. Physical hardware execution: NOT_EXECUTED."),
+    )
+
+
+@app.get("/api/validation/reports", response_model=List[models.ValidationLabReportModel])
+def list_validation_reports_endpoint(
+    case_id: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: Dict[str, Any] = Depends(require_permission("validation:read")),
+):
+    """List validation reports filtered by case ID with pagination."""
+    all_reports: List[Dict[str, Any]] = []
+    if case_id:
+        c = case_manager.get_case(case_id)
+        if not c:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{case_id}' not found.")
+        all_reports = case_manager.list_validation_reports(case_id)
+    else:
+        for c in case_manager.list_cases():
+            all_reports.extend(case_manager.list_validation_reports(c.case_id))
+
+    records = []
+    for r in all_reports:
+        suite_models = [
+            models.ValidationSuiteResultModel(
+                suite_id=s["suite_id"],
+                suite_name=s["suite_name"],
+                total_tests=s["total_tests"],
+                passed_tests=s["passed_tests"],
+                failed_tests=s["failed_tests"],
+                duration_seconds=s["duration_seconds"],
+                status=s["status"],
+                diagnostics=s.get("diagnostics", []),
+            )
+            for s in r.get("suite_summaries", [])
+        ]
+        method_models = [
+            models.MethodKatStatusItem(
+                method_id=m["method_id"],
+                method_name=m["method_name"],
+                category=m["category"],
+                truth_status=m["truth_status"],
+                software_status=m.get("software_status", "KAT_VERIFIED"),
+                hardware_status=m.get("hardware_status", "SOFTWARE_QUALIFIED"),
+                physical_execution=m.get("physical_execution", "NOT_EXECUTED"),
+                notes=m.get("notes", ""),
+            )
+            for m in r.get("method_matrix", [])
+        ]
+        records.append(
+            models.ValidationLabReportModel(
+                report_id=r["report_id"],
+                case_id=r.get("case_id", ""),
+                timestamp_utc=r.get("timestamp_utc", ""),
+                overall_verdict=r.get("overall_verdict", "UNKNOWN"),
+                total_suites=r.get("total_suites", len(suite_models)),
+                suites_passed=r.get("suites_passed", 0),
+                suites_failed=r.get("suites_failed", 0),
+                total_tests=r.get("total_tests", 0),
+                total_passed=r.get("total_passed", 0),
+                total_failed=r.get("total_failed", 0),
+                duration_seconds=r.get("duration_seconds", 0.0),
+                report_hash=r.get("report_hash", ""),
+                audit_chain_event_hash=r.get("audit_chain_event_hash", ""),
+                audit_chain_prior_hash=r.get("audit_chain_prior_hash", ""),
+                suite_summaries=suite_models,
+                method_matrix=method_models,
+                benchmarks=r.get("benchmarks", []),
+                environment=r.get("environment", {}),
+                disclaimer=r.get("disclaimer", "Observed under benchmark conditions."),
+            )
+        )
+    return records[offset : offset + limit]
+
+
+@app.get("/api/validation/reports/{report_id}", response_model=models.ValidationLabReportModel)
+def get_validation_report_details(
+    report_id: str,
+    case_id: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(require_permission("validation:read")),
+):
+    """Retrieve detailed validation report record by ID."""
+    target_case_id = case_id
+    if not target_case_id:
+        for cs in case_manager.list_cases():
+            r = case_manager.get_validation_report(cs.case_id, report_id)
+            if r:
+                target_case_id = cs.case_id
+                break
+    if not target_case_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Validation report '{report_id}' not found.")
+
+    r = case_manager.get_validation_report(target_case_id, report_id)
+    if not r:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Validation report '{report_id}' not found in case '{target_case_id}'.")
+
+    suite_models = [
+        models.ValidationSuiteResultModel(
+            suite_id=s["suite_id"],
+            suite_name=s["suite_name"],
+            total_tests=s["total_tests"],
+            passed_tests=s["passed_tests"],
+            failed_tests=s["failed_tests"],
+            duration_seconds=s["duration_seconds"],
+            status=s["status"],
+            diagnostics=s.get("diagnostics", []),
+        )
+        for s in r.get("suite_summaries", [])
+    ]
+    method_models = [
+        models.MethodKatStatusItem(
+            method_id=m["method_id"],
+            method_name=m["method_name"],
+            category=m["category"],
+            truth_status=m["truth_status"],
+            software_status=m.get("software_status", "KAT_VERIFIED"),
+            hardware_status=m.get("hardware_status", "SOFTWARE_QUALIFIED"),
+            physical_execution=m.get("physical_execution", "NOT_EXECUTED"),
+            notes=m.get("notes", ""),
+        )
+        for m in r.get("method_matrix", [])
+    ]
+
+    return models.ValidationLabReportModel(
+        report_id=r["report_id"],
+        case_id=r.get("case_id", target_case_id),
+        timestamp_utc=r.get("timestamp_utc", ""),
+        overall_verdict=r.get("overall_verdict", "UNKNOWN"),
+        total_suites=r.get("total_suites", len(suite_models)),
+        suites_passed=r.get("suites_passed", 0),
+        suites_failed=r.get("suites_failed", 0),
+        total_tests=r.get("total_tests", 0),
+        total_passed=r.get("total_passed", 0),
+        total_failed=r.get("total_failed", 0),
+        duration_seconds=r.get("duration_seconds", 0.0),
+        report_hash=r.get("report_hash", ""),
+        audit_chain_event_hash=r.get("audit_chain_event_hash", ""),
+        audit_chain_prior_hash=r.get("audit_chain_prior_hash", ""),
+        suite_summaries=suite_models,
+        method_matrix=method_models,
+        benchmarks=r.get("benchmarks", []),
+        environment=r.get("environment", {}),
+        disclaimer=r.get("disclaimer", "Observed under benchmark conditions."),
+    )
+
+
+@app.post("/api/validation/verify", response_model=models.ValidationReportVerifyResponse)
+def verify_validation_report_endpoint(
+    req: models.ValidationReportVerifyRequest,
+    current_user: Dict[str, Any] = Depends(require_permission("validation:read")),
+):
+    """Independently verify Validation Lab report cryptographic hash, audit chain linkage, and case binding."""
+    res = case_manager.verify_validation_report(req.case_id, req.report_id)
+    return models.ValidationReportVerifyResponse(
+        report_id=res["report_id"],
+        case_id=res["case_id"],
+        valid=res["valid"],
+        report_hash_valid=res["report_hash_valid"],
+        audit_chain_valid=res["audit_chain_valid"],
+        case_binding_valid=res["case_binding_valid"],
+        verdict=res["verdict"],
+        details=res["details"],
+    )
+
+
+# ─── Phase 14: Performance Laboratory Endpoints ─────────────────────────────
+
+@app.post("/api/performance/run", response_model=models.PerformanceResultModel)
+def run_performance_benchmark_endpoint(
+    req: models.PerformanceRunRequest,
+    current_user: Dict[str, Any] = Depends(require_permission("performance:run")),
+):
+    """
+    Execute resource-safe streaming throughput benchmark, capture dual-signal memory profiling,
+    persist to case vault, and append to SHA-256 audit ledger.
+    """
+    case = case_manager.get_case(req.case_id)
+    if not case:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{req.case_id}' not found.")
+
+    try:
+        PerformanceLab.validate_resource_safety(
+            dataset_size_bytes=req.dataset_size_bytes,
+            iterations=req.iterations,
+            chunk_size_bytes=req.chunk_size_bytes,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Log audit event: PERFORMANCE_BENCHMARK_STARTED
+    case_manager._append_audit_event(
+        case_id=req.case_id,
+        actor=current_user["display_name"],
+        event_type="PERFORMANCE_BENCHMARK_STARTED",
+        payload={
+            "case_id": req.case_id,
+            "dataset_size_bytes": req.dataset_size_bytes,
+            "chunk_size_bytes": req.chunk_size_bytes,
+            "iterations": req.iterations,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        },
+    )
+
+    bench_results = PerformanceLab.benchmark_streaming_invariant(
+        chunk_size_bytes=req.chunk_size_bytes,
+        dataset_sizes=[req.dataset_size_bytes],
+        iterations=req.iterations,
+    )
+    b = bench_results[0]
+    bench_dict = dataclasses.asdict(b)
+    bench_dict["benchmark_id"] = f"BENCH-{uuid.uuid4().hex[:8].upper()}"
+
+    persisted = case_manager.record_performance_benchmark(
+        case_id=req.case_id,
+        benchmark_dict=bench_dict,
+        actor=current_user["display_name"],
+    )
+
+    return models.PerformanceResultModel(
+        benchmark_id=persisted["benchmark_id"],
+        case_id=req.case_id,
+        operation_name=persisted["operation_name"],
+        dataset_size_bytes=persisted["dataset_size_bytes"],
+        duration_seconds=persisted["duration_seconds"],
+        throughput_mb_per_sec=persisted["throughput_mb_per_sec"],
+        tracemalloc_current_bytes=persisted.get("memory_end", {}).get("tracemalloc_current_bytes", 0),
+        tracemalloc_peak_bytes=persisted.get("memory_peak_heap_bytes", 0),
+        process_rss_bytes=persisted.get("memory_end", {}).get("process_rss_bytes", 0),
+        process_vms_bytes=persisted.get("memory_end", {}).get("process_vms_bytes", 0),
+        bounded_streaming_verified=persisted.get("bounded_streaming_verified", True),
+        benchmark_hash=persisted.get("benchmark_hash", ""),
+        audit_chain_event_hash=persisted.get("audit_chain_event_hash", ""),
+        audit_chain_prior_hash=persisted.get("audit_chain_prior_hash", ""),
+        timestamp_utc=persisted["timestamp_utc"],
+        metadata=persisted.get("metadata", {}),
+    )
+
+
+@app.get("/api/performance/telemetry", response_model=models.PerformanceTelemetryModel)
+def get_performance_telemetry_endpoint(
+    current_user: Dict[str, Any] = Depends(require_permission("performance:read")),
+):
+    """Retrieve live dual-signal memory metrics and environment parameters."""
+    tel = PerformanceLab.get_live_telemetry()
+    return models.PerformanceTelemetryModel(
+        timestamp_utc=tel["timestamp_utc"],
+        tracemalloc_current_bytes=tel["tracemalloc_current_bytes"],
+        tracemalloc_peak_bytes=tel["tracemalloc_peak_bytes"],
+        process_rss_bytes=tel["process_rss_bytes"],
+        process_vms_bytes=tel["process_vms_bytes"],
+        python_version=tel["python_version"],
+        os_name=tel["os_name"],
+        git_commit=tel["git_commit"],
+        environment_notes=tel["environment_notes"],
     )
 
 
