@@ -305,7 +305,7 @@ def test_category_i_drex_independent_validation():
 # ─── Category J & K: ForensicVault Persistence & Audit Ledger ─────────────────
 
 def test_category_j_k_vault_persistence_and_audit():
-    """Verify that backend recovered artifacts are stored in EvidenceVault with Merkle-linked audit ledger."""
+    """Verify that backend recovered artifacts are stored in EvidenceVault with cryptographically hash-linked audit ledger."""
     image_bytes = create_synthetic_fat32_image()
 
     with tempfile.TemporaryDirectory() as td:

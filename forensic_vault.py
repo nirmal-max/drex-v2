@@ -6,7 +6,7 @@ Provides production-grade forensic data models and runtime services for:
 - Evidence Sources (physical drives, disk images, files, partitions, fixtures)
 - Streaming Cryptographic Hasher (SHA-256 / SHA-512, memory-bounded chunking)
 - Forensic Timeline (chronological typed events, integrity hashes)
-- Hash-Chained Audit Ledger (Merkle hash chaining, independent audit verifier)
+- Hash-Chained Audit Ledger (cryptographic SHA-256 hash chaining, independent audit verifier)
 - Chain of Custody (custodian tracking, transfers, sealing, immutable history)
 - Evidence Vault (categorized object isolation: SOURCE, DERIVED, RECOVERED, REPORT, CERTIFICATE, AUDIT)
 - Recovery & Sanitization Provenance (candidate tracking, confidence scores, execution evidence)
