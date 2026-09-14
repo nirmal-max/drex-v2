@@ -2,7 +2,7 @@
 
 **Version:** DREX-V2 Phase 4 Hardened  
 **Standard:** Strict Open-Source Provenance & Forensic Traceability  
-**Total Registered Components:** 11 Components (`PROV-001` through `PROV-011`)  
+**Total Registered Components:** 12 Components (`PROV-001` through `PROV-011`, `PROV-HW-001`)  
 **Overall Licensing Status:** **ALL SOURCES COMPATIBLE / NON-BLOCKING**
 
 ---
@@ -205,4 +205,44 @@
 - **Reason for Reuse:** High-fidelity filesystem extraction engine for allocated and unallocated files from disk images; DREX serves as the assurance and independent verification layer.
 - **Dependencies:** Optional external CLI binaries (`tsk_recover.exe`, `icat.exe`).
 - **Validation Evidence:** `tests/test_phase4_backend_qualification.py::test_tsk_recover_known_answer_and_independent_validation`.
+
+---
+
+### PROV-HW-001: DriveWipe Physical Hardware Sanitization Backend
+- **Source Project:** DriveWipe
+- **Repository URL:** `https://github.com/KodyDennon/DriveWipe`
+- **Source Commit / Version:** `v2.0.5` / `c1a2e3f`
+- **Source Files Inspected:**
+  - `crates/drivewipe-core/src/wipe/mod.rs` (`WipeMethod` trait, `execute_firmware`, `before_passes`, `after_passes`)
+  - `crates/drivewipe-core/src/firmware/ata.rs` (`IOCTL_ATA_PASS_THROUGH = 0x0004D02C`, `AtaPassThroughEx`, `ATA_CMD_SEC_SET_PASS = 0xF1`, `ATA_CMD_SEC_ERASE_UNIT = 0xF4`, `ATA_CMD_SEC_DISABLE_PASS = 0xF6`, `ATA_CMD_SEC_FREEZE_LOCK = 0xF5`, `ATA_TEMP_PASSWORD = b"DriveWipeTmpPwd\0"`, `ATA_PASSWORD_BLOCK_SIZE = 512`)
+  - `crates/drivewipe-core/src/firmware/nvme.rs` (`IOCTL_STORAGE_PROTOCOL_COMMAND = 0x002D1400`, `PROTOCOL_TYPE_NVME = 3`, `STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST = 0x80000000`, `NVME_ADMIN_FORMAT_NVM = 0x80`, `NVME_ADMIN_SANITIZE = 0x84`, `NVME_ADMIN_GET_LOG_PAGE = 0x02`, `SANITIZE_LOG_PAGE_ID = 0x81`, `SANACT_BLOCK_ERASE = 2`, `SANACT_CRYPTO_ERASE = 4`, `SANACT_OVERWRITE = 3`, SPROG/SSTAT calculation `(sprog / 65536.0) * 100.0`)
+  - `crates/drivewipe-core/src/drive/windows.rs` (`\\.\PhysicalDrive0..31` discovery, `IOCTL_STORAGE_QUERY_PROPERTY`, `StorageDeviceDescriptor`, `IOCTL_DISK_GET_LENGTH_INFO`, `IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`, `StorageDeviceSeekPenaltyDescriptor`)
+- **Original License:** MIT License
+- **License Status:** COMPATIBLE / NON-BLOCKING (Permissive open source)
+- **Copyright:** Copyright (c) 2024-2026 Kody Dennon / DriveWipe Contributors
+- **DREX Destination File:** `hardware_storage.py`
+- **DREX Destination Symbol:** `DriveWipeHardwareBackend`, `HardwareDeviceCapabilities`, `HardwareOperationResult`, `NativeHardwareEngine`
+- **Adaptation Type:** REUSE_WITH_SAFETY_ADAPTATION
+- **Reason for Reuse:** Eliminates reinventing low-level Windows IOCTL dispatch and ATA/NVMe command structures by adapting mature, physically tested hardware commands directly into DREX architecture.
+- **DREX Modifications:**
+  - Added strict 15-point DREX safety gate architecture:
+    1. Identify device
+    2. Identify model
+    3. Identify serial
+    4. Identify capacity
+    5. Identify bus
+    6. Identify sector size
+    7. Detect system/boot device (`\\.\PhysicalDrive0`, `C:`, system volume)
+    8. Detect mounted volumes
+    9. Detect USB bridge (`USB_BRIDGE_BLOCKED` / `USB_BRIDGE_LIMITED`)
+    10. Detect ATA frozen state (`FROZEN` / `LOCKED`)
+    11. Detect supported firmware capability
+    12. Require explicit destructive confirmation (`confirm_destructive=True` or `DREX_CONFIRM_DESTRUCTIVE=ERASE`)
+    13. Require target identity confirmation
+    14. Require non-system status
+    15. Create operation ID & evidence record with SHA-256 hash audit chain registration
+  - Added truthful execution & qualification states (`SIMULATION_QUALIFIED`, `PHYSICAL_QUALIFIED`, `simulated_hardware_response`, `hardware_qualification: NOT_ESTABLISHED` until physical test harness is executed on dedicated test drive).
+- **Dependencies:** `ctypes` (standard library on Windows).
+- **Validation Evidence:** `tests/hardware_qualification/test_hardware_qualification_harness.py`.
+
 
