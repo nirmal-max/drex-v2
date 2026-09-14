@@ -226,8 +226,8 @@ class TestVectorBEvidenceTampering:
         def mutate(p: Path):
             # Delete evidence.json
             ev_file = p / "evidence.json"
-            if ev_file.exists():
-                ev_file.unlink()
+            assert ev_file.is_file(), f"Target file '{ev_file}' missing before deletion mutation"
+            ev_file.unlink()
 
         tampered_pkg = unpack_modify_repack(pkg, tmp_path / "tampered_b3.tar.gz", mutate)
         verifier = drex_verify.IndependentPackageVerifier(tampered_pkg)
@@ -247,7 +247,9 @@ class TestVectorCAuditTampering:
 
         def mutate(p: Path):
             a_file = p / "audit" / "audit_chain.json"
+            assert a_file.is_file(), f"Target audit file '{a_file}' missing before mutation"
             events = json.loads(a_file.read_text(encoding="utf-8"))
+            assert len(events) > 0, "Audit ledger is empty"
             events[0]["canonical_payload"]["tampered_key"] = "tampered_value"
             a_file.write_text(json.dumps(events), encoding="utf-8")
             # Recompute manifest so manifest hash check passes, isolating audit check
@@ -267,9 +269,10 @@ class TestVectorCAuditTampering:
 
         def mutate(p: Path):
             a_file = p / "audit" / "audit_chain.json"
+            assert a_file.is_file(), f"Target audit file '{a_file}' missing before mutation"
             events = json.loads(a_file.read_text(encoding="utf-8"))
-            if len(events) >= 2:
-                events[0], events[1] = events[1], events[0]
+            assert len(events) >= 2, f"Need at least 2 audit events to test reordering, found {len(events)}"
+            events[0], events[1] = events[1], events[0]
             a_file.write_text(json.dumps(events), encoding="utf-8")
             self._update_manifest(p)
 
@@ -286,9 +289,10 @@ class TestVectorCAuditTampering:
 
         def mutate(p: Path):
             a_file = p / "audit" / "audit_chain.json"
+            assert a_file.is_file(), f"Target audit file '{a_file}' missing before mutation"
             events = json.loads(a_file.read_text(encoding="utf-8"))
-            if len(events) >= 3:
-                events.pop(1)  # Drop middle event
+            assert len(events) >= 3, f"Need at least 3 audit events to test deletion, found {len(events)}"
+            events.pop(1)  # Drop middle event
             a_file.write_text(json.dumps(events), encoding="utf-8")
             self._update_manifest(p)
 
@@ -325,10 +329,11 @@ class TestVectorDCustodyTampering:
             c_file = p / "custody" / "custody_ledger.json"
             if not c_file.is_file():
                 c_file = p / "custody.json"
-            if c_file.is_file():
-                data = json.loads(c_file.read_text(encoding="utf-8"))
-                data[0]["custodian"] = "Malicious Impostor"
-                c_file.write_text(json.dumps(data), encoding="utf-8")
+            assert c_file.is_file(), f"Custody file missing in package: {c_file}"
+            data = json.loads(c_file.read_text(encoding="utf-8"))
+            assert len(data) > 0, "Custody ledger is empty"
+            data[0]["custodian"] = "Malicious Impostor"
+            c_file.write_text(json.dumps(data), encoding="utf-8")
             TestVectorCAuditTampering()._update_manifest(p)
 
         tampered_pkg = unpack_modify_repack(pkg, tmp_path / "tampered_d1.tar.gz", mutate)
@@ -349,7 +354,9 @@ class TestVectorECertificateTampering:
 
         def mutate(p: Path):
             certs_dir = p / "certificates"
-            for c_f in certs_dir.glob("*.json"):
+            cert_files = list(certs_dir.glob("*.json"))
+            assert len(cert_files) > 0, "No certificate files found to mutate"
+            for c_f in cert_files:
                 c_data = json.loads(c_f.read_text(encoding="utf-8"))
                 c_data["method"]["method_id"] = 99  # Tampered method ID
                 c_f.write_text(json.dumps(c_data), encoding="utf-8")
@@ -369,7 +376,9 @@ class TestVectorECertificateTampering:
 
         def mutate(p: Path):
             certs_dir = p / "certificates"
-            for c_f in certs_dir.glob("*.json"):
+            cert_files = list(certs_dir.glob("*.json"))
+            assert len(cert_files) > 0, "No certificate files found to mutate"
+            for c_f in cert_files:
                 c_data = json.loads(c_f.read_text(encoding="utf-8"))
                 c_data["tamper_evident_signature"] = "0" * 64
                 c_f.write_text(json.dumps(c_data), encoding="utf-8")

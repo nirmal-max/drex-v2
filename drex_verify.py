@@ -150,12 +150,12 @@ class VerificationReport:
 # ─── Independent Canonical Cryptographic Primitives ──────────────────────────
 
 def canonical_json_bytes(data: Any) -> bytes:
-    """Serialize data into deterministic, sort-keyed, compact JSON bytes."""
+    """DREX canonical JSON serialization using UTF-8, sorted object keys, and compact separators."""
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
 def hash_file_streaming(file_path: Union[str, Path], chunk_size: int = STREAMING_CHUNK_SIZE) -> Tuple[str, int]:
-    """Calculate SHA-256 digest and byte size of a file using bounded streaming memory."""
+    """Calculate SHA-256 digest and byte size of a file using test-verified bounded streaming (fixed 64 KB chunk size)."""
     path = Path(file_path)
     hasher = hashlib.sha256()
     total_bytes = 0
@@ -384,7 +384,7 @@ class IndependentPackageVerifier:
             manifest_file = self._package_root / "manifest.json"
             if not manifest_file.is_file():
                 self._add_diag("ERROR", "MANIFEST", "manifest.json", "manifest.json is missing from package root.")
-                return self._finalize(VerificationVerdict.INCOMPLETE, ExitCode.INCOMPLETE)
+                return self._finalize(VerificationVerdict.INVALID, ExitCode.INVALID)
 
             try:
                 manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
@@ -417,18 +417,19 @@ class IndependentPackageVerifier:
 
             # ── Phase 3: Manifest Root Hash Binding ──────────────────────────
             manifest_sha_file = self._package_root / "manifest.sha256"
-            if manifest_sha_file.is_file():
-                recorded_root_sha = manifest_sha_file.read_text(encoding="utf-8").strip().split()[0]
-                self.report.manifest_sha256 = recorded_root_sha
-                actual_manifest_sha, _ = hash_file_streaming(manifest_file)
-                if actual_manifest_sha.lower() != recorded_root_sha.lower():
-                    self._add_diag(
-                        "ERROR", "MANIFEST", "manifest.sha256",
-                        f"Root manifest digest mismatch: expected {recorded_root_sha[:16]}..., actual manifest.json is {actual_manifest_sha[:16]}...",
-                    )
-                    return self._finalize(VerificationVerdict.TAMPERED, ExitCode.TAMPERED)
-            else:
-                self._add_diag("INFO", "MANIFEST", "manifest.sha256", "manifest.sha256 root digest not present; validating manifest.json content directly.")
+            if not manifest_sha_file.is_file():
+                self._add_diag("ERROR", "MANIFEST", "manifest.sha256", "manifest.sha256 root digest is missing from package root.")
+                return self._finalize(VerificationVerdict.INVALID, ExitCode.INVALID)
+
+            recorded_root_sha = manifest_sha_file.read_text(encoding="utf-8").strip().split()[0]
+            self.report.manifest_sha256 = recorded_root_sha
+            actual_manifest_sha, _ = hash_file_streaming(manifest_file)
+            if actual_manifest_sha.lower() != recorded_root_sha.lower():
+                self._add_diag(
+                    "ERROR", "MANIFEST", "manifest.sha256",
+                    f"Root manifest digest mismatch: expected {recorded_root_sha[:16]}..., actual manifest.json is {actual_manifest_sha[:16]}...",
+                )
+                return self._finalize(VerificationVerdict.TAMPERED, ExitCode.TAMPERED)
 
             # ── Phase 4: Declared Objects vs Package Files Verification ──────
             declared_objects = manifest_data.get("objects", [])
@@ -685,14 +686,25 @@ class IndependentPackageVerifier:
                     self.report.summary.certificates_tampered += 1
                     all_ok = False
                 else:
-                    # Check that certificate audit_chain_event_hash matches an actual audit event if audit is present
-                    cert_audit_hash = cert_data.get("audit_chain_event_hash")
-                    if audit_events and cert_audit_hash:
+                    # Check that certificate audit reference links to an audit event if audit is present
+                    cert_prior_hash = cert_data.get("audit_chain_prior_hash")
+                    cert_event_hash = cert_data.get("audit_chain_event_hash")
+                    if audit_events:
                         audit_hashes = {e.get("current_hash") for e in audit_events}
-                        if cert_audit_hash not in audit_hashes:
+                        has_link = False
+                        if cert_prior_hash and (cert_prior_hash in audit_hashes or cert_prior_hash == GENESIS_HASH):
+                            has_link = True
+                        elif cert_event_hash and cert_event_hash in audit_hashes:
+                            has_link = True
+                        else:
+                            cert_id = cert_data.get("certificate_id")
+                            if any(cert_id == (e.get("canonical_payload") or {}).get("certificate_id") for e in audit_events):
+                                has_link = True
+
+                        if not has_link:
                             self._add_diag(
                                 "ERROR", "CERTIFICATE", c_file.name,
-                                f"Certificate audit_chain_event_hash '{cert_audit_hash[:16]}...' does not exist in audit ledger.",
+                                f"Certificate audit reference '{str(cert_prior_hash)[:16]}...' does not link to any audit ledger event.",
                             )
                             self.report.summary.certificates_tampered += 1
                             all_ok = False

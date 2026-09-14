@@ -148,7 +148,7 @@ def generate_stable_id(prefix: str) -> str:
 
 
 def canonical_json_bytes(data: Any) -> bytes:
-    """Serialize data into deterministic, sort-keyed, compact JSON bytes."""
+    """DREX canonical JSON serialization using UTF-8, sorted object keys, and compact separators."""
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 

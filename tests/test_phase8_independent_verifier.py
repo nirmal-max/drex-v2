@@ -103,3 +103,56 @@ class TestIndependentVerifier:
         expected_sha = drex_verify.hash_bytes_sha256(report_bytes)
         recorded_sha = sha_file.read_text(encoding="utf-8").strip().split()[0]
         assert recorded_sha == expected_sha
+
+    def test_missing_manifest_json_invalid(self, tmp_path: Path):
+        """Missing manifest.json must produce INVALID with exit code 3."""
+        pkg_dir = tmp_path / "pkg_no_manifest"
+        pkg_dir.mkdir()
+        (pkg_dir / "manifest.sha256").write_text("0" * 64)
+        verifier = drex_verify.IndependentPackageVerifier(pkg_dir)
+        report = verifier.verify()
+        assert report.final_verdict == drex_verify.VerificationVerdict.INVALID
+        assert report.exit_code == int(drex_verify.ExitCode.INVALID)
+
+    def test_missing_manifest_sha256_invalid(self, tmp_path: Path):
+        """Missing manifest.sha256 must produce INVALID with exit code 3."""
+        pkg_dir = tmp_path / "pkg_no_sha"
+        pkg_dir.mkdir()
+        (pkg_dir / "manifest.json").write_text(json.dumps({
+            "schema_version": "2.0",
+            "package_id": "PKG-001",
+            "case_id": "CASE-001",
+            "objects": []
+        }))
+        verifier = drex_verify.IndependentPackageVerifier(pkg_dir)
+        report = verifier.verify()
+        assert report.final_verdict == drex_verify.VerificationVerdict.INVALID
+        assert report.exit_code == int(drex_verify.ExitCode.INVALID)
+
+    def test_missing_declared_evidence_incomplete(self, tmp_path: Path):
+        """Valid Schema 2.0 package with missing declared evidence object must produce INCOMPLETE with exit code 2."""
+        pkg_dir = tmp_path / "pkg_missing_ev"
+        pkg_dir.mkdir()
+        (pkg_dir / "case").mkdir()
+        case_file = pkg_dir / "case" / "case_metadata.json"
+        case_file.write_text(json.dumps({"case_id": "CASE-001"}))
+        case_sha, case_size = drex_verify.hash_file_streaming(case_file)
+
+        manifest = {
+            "schema_version": "2.0",
+            "package_id": "PKG-001",
+            "case_id": "CASE-001",
+            "objects": [
+                {"relative_path": "case/case_metadata.json", "sha256": case_sha, "size_bytes": case_size},
+                {"relative_path": "evidence/missing_drive.raw", "sha256": "a" * 64, "size_bytes": 1024}
+            ]
+        }
+        m_bytes = drex_verify.canonical_json_bytes(manifest)
+        (pkg_dir / "manifest.json").write_bytes(m_bytes)
+        (pkg_dir / "manifest.sha256").write_text(f"{drex_verify.hash_bytes_sha256(m_bytes)}  manifest.json\n")
+
+        verifier = drex_verify.IndependentPackageVerifier(pkg_dir)
+        report = verifier.verify()
+        assert report.final_verdict == drex_verify.VerificationVerdict.INCOMPLETE
+        assert report.exit_code == int(drex_verify.ExitCode.INCOMPLETE)
+        assert report.summary.objects_missing == 1

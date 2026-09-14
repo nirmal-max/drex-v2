@@ -74,6 +74,33 @@ class TestManifestIntegrity:
         assert bytes_a == bytes_b
         assert hashlib.sha256(bytes_a).hexdigest() == hashlib.sha256(bytes_b).hexdigest()
 
+    def test_canonical_json_nested_types_and_equivalence(self):
+        """Test canonical JSON serialization across nested objects, arrays, booleans, null, ints, floats, strings."""
+        complex_payload = {
+            "z_field": "last",
+            "a_field": "first",
+            "nested_obj": {
+                "flag_true": True,
+                "flag_false": False,
+                "null_val": None,
+                "count": 42,
+                "negative": -100,
+                "ratio": 3.14159,
+                "unicode_str": "Forensics \u00a7 14.1 \u2014 \u03bc-test"
+            },
+            "array_vals": [1, 2, {"inner_k": "inner_v"}, False, None],
+        }
+        bytes_verifier = drex_verify.canonical_json_bytes(complex_payload)
+        bytes_producer = canonical_json_bytes(complex_payload)
+
+        # Producer and verifier must match byte-for-byte
+        assert bytes_verifier == bytes_producer
+        # Must be valid UTF-8
+        decoded = json.loads(bytes_verifier.decode("utf-8"))
+        assert decoded["a_field"] == "first"
+        assert decoded["nested_obj"]["flag_true"] is True
+        assert decoded["nested_obj"]["null_val"] is None
+
     def test_manifest_sha256_root_binding(self, sample_case_package: Path):
         """Exported package must contain manifest.sha256 matching manifest.json."""
         verifier = drex_verify.IndependentPackageVerifier(sample_case_package)
