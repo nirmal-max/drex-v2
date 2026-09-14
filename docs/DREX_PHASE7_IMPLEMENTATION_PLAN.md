@@ -369,7 +369,7 @@ Certificates generated via `ForensicCertificateEngine` incorporate full hardware
 * Method Specification and Exact Standard Reference (`NIST SP 800-88 Rev. 2 aligned` or `NIST SP 800-88 Rev. 1 aligned`).
 * Truth Model Summary: `execution: REAL | SIMULATED`, `verification: EXACT_BYTE_READBACK | STATUS_LOG_READBACK`, `software_qualification: SOFTWARE-QUALIFIED`, `physical_execution: NOT_EXECUTED`, `physical_qualification: NOT_ESTABLISHED`.
 * Full Machine-Readable Forensic Disclaimers & Limitations.
-* Redacted export option: retains cryptographic signature and audit reference while redacting sensitive examiner names or serial numbers if requested. Redacted exports do not mutate authoritative evidence.
+* Redacted export option: retains cryptographic integrity token and audit reference while redacting sensitive examiner names or serial numbers if requested. Redacted exports do not mutate authoritative evidence.
 
 ---
 

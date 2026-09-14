@@ -226,7 +226,7 @@ class ForensicCertificateEngine:
         prior_audit_hash: str = "0000000000000000000000000000000000000000000000000000000000000000",
         limitations: Optional[List[str]] = None,
     ) -> ForensicSanitizationCertificate:
-        """Create and cryptographically sign a forensic sanitization certificate."""
+        """Create a forensic sanitization certificate with SHA-256 integrity binding."""
         cert_id = f"CERT-DREX-{uuid.uuid4().hex[:12].upper()}"
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -242,7 +242,7 @@ class ForensicCertificateEngine:
         )
         event_hash = hashlib.sha256(data_to_hash.encode("utf-8")).hexdigest()
 
-        # Compute certificate cryptographic signature token
+        # Compute certificate cryptographic integrity token (SHA-256 integrity binding)
         signature_payload = f"{event_hash}:{prior_audit_hash}:{timestamp}"
         signature = hashlib.sha256(signature_payload.encode("utf-8")).hexdigest()
 

@@ -4580,7 +4580,7 @@ class DrexApp(tk.Tk):
         if not record:
             return
         if not self.cert_manager.verify(record):
-            messagebox.showerror("Certificate validation failed", "DREX could not validate the cryptographic signature for this certificate.")
+            messagebox.showerror("Certificate validation failed", "DREX could not validate the cryptographic integrity token for this certificate.")
             return
         path = Path(record.get("pdf_path", ""))
         if path.exists():
