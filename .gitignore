@@ -20,3 +20,6 @@ __pycache__/
 *.pyo
 *.exe
 .pytest_cache/
+drex_data/vault/
+drex_data/cases/
+

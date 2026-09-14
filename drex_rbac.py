@@ -29,11 +29,26 @@ import jwt
 from drex_api_models import UserRole
 
 
+import os
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-JWT_SECRET = "DREX_FORENSIC_SECURE_TOKEN_KEY_9A7B3C1D8E2F"
+_DEFAULT_DEV_SECRET = "DREX_FORENSIC_SECURE_TOKEN_KEY_9A7B3C1D8E2F"
+JWT_SECRET = os.environ.get("DREX_JWT_SECRET", _DEFAULT_DEV_SECRET)
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours for workstation convenience
+
+
+def validate_jwt_secret_for_environment() -> None:
+    """Enforce that production mode (DREX_ENV=production) refuses weak or default secrets."""
+    is_prod = os.environ.get("DREX_ENV", "development").strip().lower() == "production"
+    if is_prod:
+        current_secret = os.environ.get("DREX_JWT_SECRET", "")
+        if not current_secret or current_secret == _DEFAULT_DEV_SECRET or len(current_secret) < 32:
+            raise RuntimeError(
+                "FATAL: Insecure or default JWT_SECRET configured in production mode. "
+                "Set environment variable DREX_JWT_SECRET to a cryptographically random string (min 32 chars)."
+            )
 
 
 # ─── Permissions Matrix ───────────────────────────────────────────────────────
@@ -45,6 +60,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "timeline:read",
         "devices:read", "devices:qualify",
         "recovery:scan", "recovery:extract",
+        "jobs:read", "jobs:cancel",
         "sanitization:plan", "sanitization:execute",
         "residue:analyze",
         "verification:verify", "verification:entropy",
@@ -62,6 +78,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "timeline:read",
         "devices:read", "devices:qualify",
         "recovery:scan", "recovery:extract",
+        "jobs:read", "jobs:cancel",
         "sanitization:plan",
         "residue:analyze",
         "verification:verify", "verification:entropy",
@@ -79,6 +96,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "timeline:read",
         "devices:read",
         "recovery:read",
+        "jobs:read",
         "verification:verify",
         "audit:read",
         "vault:read",
@@ -90,6 +108,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "cases:read",
         "evidence:read",
         "devices:read", "devices:qualify",
+        "jobs:read", "jobs:cancel",
         "sanitization:plan", "sanitization:execute",
         "residue:analyze",
         "verification:verify", "verification:entropy",
@@ -101,6 +120,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "cases:read",
         "evidence:read",
         "timeline:read",
+        "jobs:read",
         "verification:verify",
         "audit:read", "audit:verify",
         "vault:read",
@@ -114,6 +134,7 @@ ROLE_PERMISSIONS: Dict[UserRole, Set[str]] = {
         "timeline:read",
         "devices:read", "devices:qualify",
         "recovery:scan", "recovery:extract",
+        "jobs:read", "jobs:cancel",
         "sanitization:plan", "sanitization:execute",  # Simulation only
         "residue:analyze",
         "verification:verify", "verification:entropy",

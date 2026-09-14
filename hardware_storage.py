@@ -528,6 +528,46 @@ class DestructiveHardwareTripwire:
             )
 
 
+# ─── Granular Win32 Error Classification & TOCTOU Revalidation ───────────────
+
+class Win32ErrorClassifier:
+    """Authoritative classification of Windows storage and device I/O error codes.
+    
+    Guarantees that non-disconnection errors (CRC, device not ready, general failure)
+    are NEVER falsely collapsed into DEVICE_DISCONNECTED without physical evidence.
+    """
+    @staticmethod
+    def classify(error_code: int) -> Tuple[str, str]:
+        """Classify Windows error code into (forensic_category, lifecycle_state).
+        
+        Mappings:
+        - 1167 (ERROR_DEVICE_NOT_CONNECTED) -> ("DEVICE_DISCONNECTED", "DEVICE_DISCONNECTED")
+        - 21   (ERROR_NOT_READY)            -> ("DEVICE_NOT_READY", "FAILED")
+        - 2    (ERROR_FILE_NOT_FOUND)       -> ("TARGET_UNAVAILABLE", "FAILED")
+        - 23   (ERROR_CRC)                  -> ("READ_FAILURE", "FAILED")
+        - 31   (ERROR_GEN_FAILURE)          -> ("COMMAND_FAILURE", "FAILED")
+        - 5    (ERROR_ACCESS_DENIED)        -> ("INSUFFICIENT_PRIVILEGE", "FAILED")
+        - Others                            -> ("DEVICE_IO_FAILURE", "FAILED")
+        """
+        if error_code == 1167:
+            return "DEVICE_DISCONNECTED", "DEVICE_DISCONNECTED"
+        elif error_code == 21:
+            return "DEVICE_NOT_READY", "FAILED"
+        elif error_code == 2:
+            return "TARGET_UNAVAILABLE", "FAILED"
+        elif error_code == 23:
+            return "READ_FAILURE", "FAILED"
+        elif error_code == 31:
+            return "COMMAND_FAILURE", "FAILED"
+        elif error_code == 5:
+            return "INSUFFICIENT_PRIVILEGE", "FAILED"
+        else:
+            return "DEVICE_IO_FAILURE", "FAILED"
+
+
+# ─── Physical Storage IOCTL Interrogation Engine ──────────────────────────────
+
+
 # ─── Device Intelligence & Interrogation Engine ──────────────────────────────
 
 class DeviceIntelligenceEngine:

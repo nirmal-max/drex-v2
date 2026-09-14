@@ -38,11 +38,23 @@ class ExecutionTruthState(str, Enum):
     FAILED = "FAILED"
 
 
+class JobLifecycleState(str, Enum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    CANCELLING = "CANCELLING"
+    CANCELLED = "CANCELLED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    INTERRUPTED = "INTERRUPTED"
+    DEVICE_DISCONNECTED = "DEVICE_DISCONNECTED"
+    VERIFICATION_FAILED = "VERIFICATION_FAILED"
+
+
 # ─── Authentication Models ───────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(..., max_length=100)
+    password: str = Field(..., max_length=200)
 
 
 class AuthTokenResponse(BaseModel):
@@ -61,11 +73,11 @@ class DemoPersonaSwitchRequest(BaseModel):
 # ─── Case & Evidence Models ───────────────────────────────────────────────────
 
 class ForensicCaseCreate(BaseModel):
-    case_number: str
-    title: str
-    examiner: str
-    organization: Optional[str] = "Forensic Assurance Lab"
-    notes: Optional[str] = ""
+    case_number: str = Field(..., min_length=1, max_length=64)
+    title: str = Field(..., min_length=1, max_length=200)
+    examiner: str = Field(..., min_length=1, max_length=100)
+    organization: Optional[str] = Field("Forensic Assurance Lab", max_length=200)
+    notes: Optional[str] = Field("", max_length=2000)
 
 
 class ForensicCaseRecord(BaseModel):
@@ -233,3 +245,56 @@ class JobProgressUpdate(BaseModel):
     items_processed: int
     total_items: int
     log_line: Optional[str] = None
+
+
+class JobStatusRecord(BaseModel):
+    operation_id: str
+    job_id: str
+    case_id: str
+    evidence_id: Optional[str] = None
+    actor: str
+    method_id: Optional[int] = None
+    target_path: str
+    operation_type: str
+    status: JobLifecycleState
+    percent_complete: float = 0.0
+    start_time_utc: str
+    end_time_utc: Optional[str] = None
+    elapsed_seconds: float = 0.0
+    details: Dict[str, Any] = Field(default_factory=dict)
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+class PaginationQuery(BaseModel):
+    limit: int = Field(100, ge=1, le=1000)
+    offset: int = Field(0, ge=0)
+
+
+class DuplicateOperationResponse(BaseModel):
+    status: str = "EXISTING_JOB_ATTACHED"
+    job_id: str
+    operation_id: str
+    message: str
+
+
+class CaseRestoreRequest(BaseModel):
+    backup_zip_path: str
+    target_cases_dir: Optional[str] = None
+
+
+class CaseBackupResponse(BaseModel):
+    case_id: str
+    backup_path: str
+    manifest_path: str
+    archive_sha256: str
+    status: str = "BACKUP_COMPLETED"
+
+
+class CaseRestoreResponse(BaseModel):
+    case_id: str
+    restored_path: str
+    audit_chain_valid: bool
+    status: str = "RESTORE_COMPLETED"
+
+

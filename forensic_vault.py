@@ -29,6 +29,7 @@ import tarfile
 import tempfile
 import threading
 import uuid
+import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1804,3 +1805,96 @@ class ForensicCaseManager:
         events.append(audit_evt.to_dict())
         safe_atomic_json_write(audit_file, events)
         return audit_evt
+
+    def create_case_backup(self, case_id: str, destination_dir: Optional[Union[Path, str]] = None) -> Tuple[Path, str]:
+        """Create a sealed, verifiable ZIP backup of the case directory with a detached SHA-256 manifest."""
+        with self._lock:
+            case = self.get_case(case_id)
+            if not case:
+                raise ValueError(f"Case not found: {case_id}")
+            cdir = self._case_path(case_id)
+            if destination_dir:
+                dpath = Path(destination_dir).resolve()
+                if dpath.suffix.lower() == ".zip":
+                    archive_path = dpath
+                    dest = dpath.parent
+                else:
+                    dest = dpath
+                    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    archive_path = dest / f"case_backup_{case_id}_{ts}.zip"
+            else:
+                dest = (self.base_dir / "backups").resolve()
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                archive_path = dest / f"case_backup_{case_id}_{ts}.zip"
+            dest.mkdir(parents=True, exist_ok=True)
+
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for root, _, files in os.walk(cdir):
+                    for file in files:
+                        fp = Path(root) / file
+                        arcname = fp.relative_to(cdir)
+                        zf.write(fp, arcname=str(arcname))
+
+            archive_sha256 = StreamingHasher.hash_file(archive_path).digest
+            manifest_path = dest / f"{archive_path.stem}.manifest.json"
+            manifest = {
+                "schema_version": "2.0",
+                "backup_type": "DREX_CASE_BACKUP",
+                "case_id": case_id,
+                "case_number": case.case_number,
+                "created_at_utc": utc_now_iso(),
+                "archive_filename": archive_path.name,
+                "archive_sha256": archive_sha256,
+            }
+            safe_atomic_json_write(manifest_path, manifest)
+            return archive_path, archive_sha256
+
+    def restore_case_backup(self, archive_path: Union[Path, str], expected_sha256: Optional[str] = None) -> ForensicCase:
+        """Restore a case from a backup archive with strict integrity checks and cross-case overwrite protection."""
+        with self._lock:
+            archive_path = Path(archive_path)
+            if not archive_path.is_file():
+                raise FileNotFoundError(f"Backup archive not found: {archive_path}")
+
+            actual_sha256 = StreamingHasher.hash_file(archive_path).digest
+            if expected_sha256 and actual_sha256.lower() != expected_sha256.lower():
+                raise ValueError(f"Backup archive integrity failure: SHA-256 mismatch ({actual_sha256} != {expected_sha256})")
+
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                total_size = 0
+                for info in zf.infolist():
+                    if ".." in info.filename or info.filename.startswith(("/", "\\")):
+                        raise ValueError(f"Zip slip attempt detected in backup archive: {info.filename}")
+                    total_size += info.file_size
+                    if total_size > 10 * 1024 * 1024 * 1024:  # 10 GB limit
+                        raise ValueError("Backup archive exceeds maximum allowable uncompressed size (10 GB).")
+
+                if "case.json" not in zf.namelist():
+                    raise ValueError("Invalid backup archive: missing root 'case.json'.")
+
+                case_raw = json.loads(zf.read("case.json").decode("utf-8"))
+                case_id = case_raw.get("case_id")
+                if not case_id:
+                    raise ValueError("Invalid backup archive: 'case.json' missing case_id.")
+
+                target_cdir = self._case_path(case_id)
+                if target_cdir.exists():
+                    raise ValueError(f"Cross-case overwrite violation: case '{case_id}' already exists. Refusing silent overwrite.")
+
+                target_cdir.mkdir(parents=True, exist_ok=True)
+                zf.extractall(target_cdir)
+
+            try:
+                verification = self.verify_case_audit_chain(case_id)
+                if verification.status != AuditVerificationStatus.VALID:
+                    shutil.rmtree(target_cdir, ignore_errors=True)
+                    raise ValueError(f"Audit chain verification failed for restored case: {verification.details}")
+            except Exception as e:
+                shutil.rmtree(target_cdir, ignore_errors=True)
+                raise ValueError(f"Restoration integrity verification failed: {e}")
+
+            restored = self.get_case(case_id)
+            if not restored:
+                raise ValueError(f"Failed to load restored case: {case_id}")
+            return restored
+
