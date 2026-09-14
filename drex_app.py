@@ -5495,12 +5495,47 @@ def run_doctor() -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     global _ELEVATION_STATE
     argv = argv or sys.argv[1:]
+    if "--server" in argv:
+        import uvicorn
+        port = 8765
+        for a in argv:
+            if a.startswith("--port="):
+                try:
+                    port = int(a.split("=")[1])
+                except ValueError:
+                    pass
+        print(f"Starting DREX-V2 Multi-Surface Forensic Server on http://127.0.0.1:{port} ...")
+        uvicorn.run("drex_server:app", host="127.0.0.1", port=port, log_level="info")
+        return 0
+    if "--web" in argv:
+        import threading
+        import webbrowser
+        import uvicorn
+        port = 8765
+        t = threading.Thread(target=lambda: uvicorn.run("drex_server:app", host="127.0.0.1", port=port, log_level="warning"), daemon=True)
+        t.start()
+        time.sleep(1.0)
+        webbrowser.open(f"http://127.0.0.1:{port}/")
+        print(f"DREX-V2 Web Console running at http://127.0.0.1:{port}/ (Press Ctrl+C to stop)")
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            return 0
     if "--version" in argv:
         print(f"{APP_NAME} {VERSION}")
         return 0
     if "--doctor" in argv:
         print(json.dumps(run_doctor(), indent=2))
         return 0
+    if "--validation-lab" in argv:
+        from validation_lab import ValidationLabEngine, generate_markdown_report
+        report = ValidationLabEngine.run_all_suites()
+        if "--json" in argv:
+            print(json.dumps(asdict(report), indent=2))
+        else:
+            print(generate_markdown_report(report))
+        return 0 if report.overall_verdict == "PASS" else 1
     if "--self-test" in argv:
         with tempfile.TemporaryDirectory(prefix="drex-self-test-") as temp:
             root = Path(temp)

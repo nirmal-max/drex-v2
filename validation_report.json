@@ -1,0 +1,95 @@
+{
+  "report_id": "DREX-VAL-REPORT-1789376997",
+  "timestamp_utc": "2026-09-14T09:09:57Z",
+  "overall_verdict": "PASS",
+  "total_suites": 5,
+  "suites_passed": 5,
+  "suites_failed": 0,
+  "total_tests": 10,
+  "total_passed": 10,
+  "total_failed": 0,
+  "duration_seconds": 0.1328,
+  "suite_summaries": [
+    {
+      "suite_id": "SUITE-KAT-REC",
+      "suite_name": "Known-Answer Recovery (M17-M25)",
+      "total_tests": 3,
+      "passed_tests": 3,
+      "failed_tests": 0,
+      "duration_seconds": 0.0866,
+      "status": "PASS",
+      "diagnostics": []
+    },
+    {
+      "suite_id": "SUITE-KAT-SAN",
+      "suite_name": "Known-Answer Sanitization (M01-M16)",
+      "total_tests": 1,
+      "passed_tests": 1,
+      "failed_tests": 0,
+      "duration_seconds": 0.0002,
+      "status": "PASS",
+      "diagnostics": []
+    },
+    {
+      "suite_id": "SUITE-HW-SAFETY",
+      "suite_name": "Hardware Safety & Qualification Gate",
+      "total_tests": 1,
+      "passed_tests": 1,
+      "failed_tests": 0,
+      "duration_seconds": 0.0225,
+      "status": "PASS",
+      "diagnostics": []
+    },
+    {
+      "suite_id": "SUITE-STRESS",
+      "suite_name": "Resource-Bounded Adversarial Stress",
+      "total_tests": 4,
+      "passed_tests": 4,
+      "failed_tests": 0,
+      "duration_seconds": 0.013,
+      "status": "PASS",
+      "diagnostics": []
+    },
+    {
+      "suite_id": "SUITE-PERF",
+      "suite_name": "Performance Laboratory & Memory Telemetry",
+      "total_tests": 1,
+      "passed_tests": 1,
+      "failed_tests": 0,
+      "duration_seconds": 0.0099,
+      "status": "PASS",
+      "diagnostics": []
+    }
+  ],
+  "benchmarks": [
+    {
+      "benchmark_id": "BENCH-SHA256-STREAM",
+      "operation_name": "Streaming SHA-256 (64 KB Chunk Buffer)",
+      "dataset_size_bytes": 4608000,
+      "duration_seconds": 0.003601,
+      "throughput_mb_per_sec": 1220.36,
+      "candidates_processed": 0,
+      "candidate_rate_per_sec": 0.0,
+      "memory_start": {
+        "timestamp_utc": 1789376997.8084137,
+        "tracemalloc_current_bytes": 64,
+        "tracemalloc_peak_bytes": 64,
+        "process_rss_bytes": 0,
+        "process_vms_bytes": 0
+      },
+      "memory_end": {
+        "timestamp_utc": 1789376997.8123865,
+        "tracemalloc_current_bytes": 10436,
+        "tracemalloc_peak_bytes": 4621750,
+        "process_rss_bytes": 0,
+        "process_vms_bytes": 0
+      },
+      "memory_heap_delta_bytes": 10372,
+      "memory_peak_heap_bytes": 4621750,
+      "bounded_streaming_verified": true,
+      "metadata": {
+        "result_returned": true
+      }
+    }
+  ]
+}

@@ -24,9 +24,8 @@ $MethodsData = (Join-Path $ProjectRoot "methods") + ";methods"
 $NativeBin = Join-Path $ProjectRoot "native_bin"
 $DataArgs = @("--add-data", $MethodsData)
 if (Test-Path $NativeBin) { $DataArgs += @("--add-data", ($NativeBin + ";native_bin")) }
-python -m PyInstaller --noconfirm --clean --windowed --onefile `
+python -m PyInstaller --noconfirm --clean --onefile `
   --name DREX `
-  --uac-admin `
   @DataArgs `
   --distpath $DistRoot `
   --workpath $PyInstallerRoot `

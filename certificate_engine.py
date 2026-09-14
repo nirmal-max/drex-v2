@@ -103,7 +103,7 @@ class PurePythonPDFWriter:
     def __init__(
         self,
         title: str = "DREX-V2 Forensic Certificate",
-        standard_banner: str = "NIST SP 800-88 Rev. 2 Aligned & ISO/IEC 27037 Referenced Evidence Record",
+        standard_banner: str = "NIST SP 800-88 Rev. 2 Aligned Evidence Record & Cryptographic Attestation",
     ):
         self.title = title
         self.standard_banner = standard_banner

@@ -787,17 +787,94 @@ class DeviceIntelligenceEngine:
         )
 
     @classmethod
+    def get_windows_system_disk_numbers(cls) -> Set[int]:
+        """Dynamically detect physical disk indices backing active Windows system/boot volumes."""
+        system_disks: Set[int] = set()
+        if os.name != "nt" or sys.platform != "win32":
+            return system_disks
+
+        # Check both SystemDrive (e.g. C:) and SystemRoot volume if distinct
+        candidate_drives = set()
+        sys_drive = os.environ.get("SystemDrive", "C:").upper().rstrip("\\")
+        if sys_drive:
+            candidate_drives.add(sys_drive if sys_drive.endswith(":") else f"{sys_drive}:")
+        sys_root = os.environ.get("SystemRoot", r"C:\Windows")
+        if len(sys_root) >= 2 and sys_root[1] == ":":
+            candidate_drives.add(sys_root[:2].upper())
+
+        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        for drive_letter in candidate_drives:
+            vol_path = f"\\\\.\\{drive_letter}"
+            # Open volume handle with 0 desired access (query device attributes without lock)
+            h = kernel32.CreateFileW(
+                vol_path,
+                0,
+                0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+                None,
+                3,  # OPEN_EXISTING
+                0,
+                None,
+            )
+            if h != -1 and h != 0xFFFFFFFFFFFFFFFF:
+                try:
+                    import struct
+                    buf = ctypes.create_string_buffer(1024)
+                    bytes_ret = ctypes.wintypes.DWORD()
+                    ok = kernel32.DeviceIoControl(
+                        h,
+                        IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                        None,
+                        0,
+                        buf,
+                        len(buf),
+                        ctypes.byref(bytes_ret),
+                        None,
+                    )
+                    if ok:
+                        num_extents = struct.unpack_from("<I", buf.raw, 0)[0]
+                        for i in range(num_extents):
+                            disk_idx = struct.unpack_from("<I", buf.raw, 8 + i * 24)[0]
+                            system_disks.add(disk_idx)
+                finally:
+                    kernel32.CloseHandle(h)
+
+        return system_disks
+
+    @classmethod
     def is_system_drive(cls, device_path: str, disk_number: Optional[int] = None) -> bool:
         """Determine whether device path matches protected Windows boot/system disk."""
         dev_upper = device_path.upper().strip()
-        if "PHYSICALDRIVE0" in dev_upper or disk_number == 0:
+
+        # Dynamic Windows volume-to-disk extent detection
+        sys_disks = cls.get_windows_system_disk_numbers()
+        if disk_number is not None and disk_number in sys_disks:
+            return True
+
+        # Check if device_path explicitly names a system disk number (e.g. \\.\PhysicalDrive0)
+        m = re.search(r"PHYSICALDRIVE(\d+)", dev_upper)
+        if m:
+            path_disk_num = int(m.group(1))
+            if path_disk_num in sys_disks:
+                return True
+
+        # Check drive letters
+        sys_drive = os.environ.get("SystemDrive", "C:").upper().rstrip("\\")
+        if not sys_drive.endswith(":"):
+            sys_drive = f"{sys_drive}:"
+        if dev_upper.startswith(f"\\\\.\\{sys_drive}") or dev_upper == sys_drive:
             return True
         if dev_upper.startswith(r"\\.\C:") or dev_upper in ("C:", "C:\\"):
             return True
-        sys_drive = os.environ.get("SystemDrive", "C:").upper().rstrip("\\")
-        if dev_upper.startswith(f"\\\\.\\{sys_drive}") or dev_upper == sys_drive:
-            return True
+
+        # Conservative fallback if no system disk numbers were detected
+        if not sys_disks:
+            if "PHYSICALDRIVE0" in dev_upper or disk_number == 0:
+                return True
+
         return False
+
 
 
 # ─── Safety State Machine & Central Safety Gate ──────────────────────────────
