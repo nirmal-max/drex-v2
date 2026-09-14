@@ -367,6 +367,76 @@
 - **Dependencies:** None (Pure Python standard library).
 - **Validation Evidence:** `tests/test_forensic_certificate.py`.
 
+---
+
+### PROV-P7-001: Hardware Fact & Identity Provenance Data Model
+- **Source Project:** DREX-V2 Native Hardware Storage Architecture
+- **Standard:** Forensic Property Provenance & Typed Storage Truth Models
+- **License:** Apache License 2.0
+- **License Status:** COMPATIBLE / NON-BLOCKING
+- **DREX Destination File:** `hardware_storage.py`
+- **DREX Destination Symbol:** `HardwareFact`, `DeviceIdentitySnapshot`, `PropertySource`, `TransportBus`, `UnderlyingInterface`, `MediaType`
+- **Adaptation Type:** CLEAN_ROOM_FORENSIC_DESIGN
+- **Reason for Reuse:** Guarantees that every hardware attribute carries source attribution, confidence level, and separation of physical transport from underlying interface.
+- **Dependencies:** `dataclasses`, `enum` (standard library).
+- **Validation Evidence:** `tests/test_device_intelligence_discovery.py`.
+
+---
+
+### PROV-P7-002: Pre-Execution TOCTOU Revalidation Engine
+- **Source Project:** DREX-V2 Safety-Critical Execution Control
+- **Standard:** Atomic Pre-Execution State Revalidation
+- **License:** Apache License 2.0
+- **License Status:** COMPATIBLE / NON-BLOCKING
+- **DREX Destination File:** `hardware_storage.py`
+- **DREX Destination Symbol:** `PreExecutionRevalidator`, `DeviceIdentitySnapshot`
+- **Adaptation Type:** CLEAN_ROOM_FORENSIC_DESIGN
+- **Reason for Reuse:** Prevents Time-of-Check to Time-of-Use drift by asserting that serial, model, capacity, sector size, and system-drive relationships match immediately prior to destructive execution.
+- **Dependencies:** `re`, `ctypes` (standard library).
+- **Validation Evidence:** `tests/test_device_identity_stability.py`.
+
+---
+
+### PROV-P7-003: Central Device Safety State Machine & Containment Gates
+- **Source Project:** DREX-V2 Safety Architecture & DriveWipe Safety Logic
+- **Standard:** Fail-Closed Storage Containment
+- **License:** Apache License 2.0 / MIT
+- **License Status:** COMPATIBLE / NON-BLOCKING
+- **DREX Destination File:** `hardware_storage.py`
+- **DREX Destination Symbol:** `DeviceSafetyStateMachine`, `SafetyState`, `HardwareExecutionStatus`
+- **Adaptation Type:** REUSE_WITH_SAFETY_ADAPTATION
+- **Reason for Reuse:** Strict fail-closed safety evaluation blocking destructive operations against boot/system disks, active OS volumes, write-protected media, ATA frozen/locked drives, and unsupported USB bridges.
+- **Dependencies:** None (Pure Python standard library).
+- **Validation Evidence:** `tests/test_hardware_safety_and_locking.py`, `tests/test_destructive_execution_gate.py`.
+
+---
+
+### PROV-P7-004: Canonical 25-Method Deterministic Qualification Engine
+- **Source Project:** DREX-V2 Core Method Registry
+- **Standard:** Full Coverage of Canonical Methods M01-M25
+- **License:** Apache License 2.0
+- **License Status:** COMPATIBLE / NON-BLOCKING
+- **DREX Destination File:** `hardware_storage.py`
+- **DREX Destination Symbol:** `Qualification25MethodEngine`, `CANONICAL_25_METHODS_SPEC`, `MethodQualificationRecord`
+- **Adaptation Type:** CLEAN_ROOM_FORENSIC_DESIGN
+- **Reason for Reuse:** Evaluates all 25 canonical methods against target device snapshot, ensuring read-only recovery methods (M17-M25) remain available while destructive methods (M01-M16) are safely gated.
+- **Dependencies:** `dataclasses`, `enum` (standard library).
+- **Validation Evidence:** `tests/test_25_methods_hardware_qualification.py`.
+
+---
+
+### PROV-P7-005: Destructive Hardware Execution Tripwire
+- **Source Project:** DREX-V2 Quality Assurance & Laboratory Safety
+- **Standard:** Zero Unauthorized Hardware Mutation Guard
+- **License:** Apache License 2.0
+- **License Status:** COMPATIBLE / NON-BLOCKING
+- **DREX Destination File:** `hardware_storage.py`
+- **DREX Destination Symbol:** `DestructiveHardwareTripwire`
+- **Adaptation Type:** CLEAN_ROOM_FORENSIC_DESIGN
+- **Reason for Reuse:** Hardware execution boundary guard ensuring automated pytest suites never issue destructive IOCTLs or writes against physical host storage.
+- **Dependencies:** `os`, `re` (standard library).
+- **Validation Evidence:** `tests/test_destructive_execution_gate.py`.
+
 
 
 

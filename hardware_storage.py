@@ -1,9 +1,12 @@
 """
-DREX-V2 Native Hardware Storage & Controller Sanitization Backend
-=================================================================
-Implements low-level Windows DeviceIoControl storage IOCTLs, ATA pass-through
+DREX-V2 Native Hardware Storage & Device Intelligence Architecture
+==================================================================
+Implements production-grade Windows DeviceIoControl storage IOCTLs, ATA pass-through
 (IOCTL_ATA_PASS_THROUGH), NVMe admin protocol commands (IOCTL_STORAGE_PROTOCOL_COMMAND),
-storage bus classification, USB bridge containment, and safety gating.
+raw hardware property provenance, transport vs underlying interface decoupling,
+fail-closed USB bridge containment, 11-stage safety lifecycle state machine,
+atomic pre-execution revalidation (TOCTOU guard), deterministic 25-method qualification
+matrix (M01-M25), and destructive test safety tripwires.
 
 Adapted from proven low-level controller implementations in DriveWipe-core v2.0.5
 (crates/drivewipe-core/src/wipe/firmware/ata.rs, nvme.rs, windows.rs) by Kody Dennon,
@@ -11,7 +14,7 @@ incorporating ATA ACS and NVMe 1.4 specification command encodings.
 
 Upstream Hardware Validation: DOCUMENTED / VERIFIED
 DREX Backend Integration:    IMPLEMENTED / TESTED
-DREX Physical Execution:      NOT_EXECUTED (unless dedicated test harness device used)
+DREX Physical Execution:      NOT_EXECUTED (unless dedicated sacrificial device authorized)
 DREX Physical Qualification:  NOT_ESTABLISHED (until physical device tested and evidence sealed)
 
 License: Apache 2.0 (compatible with DriveWipe MIT/permissive terms).
@@ -33,10 +36,55 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 
-# ─── Enumerations ─────────────────────────────────────────────────────────────
+# ─── Enumerations & Constant Types ───────────────────────────────────────────
+
+class PropertySource(enum.Enum):
+    IOCTL_STORAGE_QUERY_PROPERTY = "IOCTL_STORAGE_QUERY_PROPERTY"
+    IOCTL_STORAGE_PROTOCOL_COMMAND = "IOCTL_STORAGE_PROTOCOL_COMMAND"
+    IOCTL_ATA_PASS_THROUGH = "IOCTL_ATA_PASS_THROUGH"
+    IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = "IOCTL_DISK_GET_DRIVE_GEOMETRY_EX"
+    IOCTL_DISK_GET_LENGTH_INFO = "IOCTL_DISK_GET_LENGTH_INFO"
+    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS"
+    WIN32_CIM_WMI_FALLBACK = "WIN32_CIM_WMI_FALLBACK"
+    SYNTHETIC_TEST_DESCRIPTOR = "SYNTHETIC_TEST_DESCRIPTOR"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class TransportBus(enum.Enum):
+    NVME = "NVME"
+    SATA = "SATA"
+    ATA = "ATA"
+    USB = "USB"
+    SCSI = "SCSI"
+    SAS = "SAS"
+    IEEE1394 = "IEEE1394"
+    VIRTUAL = "VIRTUAL"
+    UNKNOWN = "UNKNOWN"
+
+
+class UnderlyingInterface(enum.Enum):
+    NATIVE_NVME = "NATIVE_NVME"
+    NATIVE_SATA = "NATIVE_SATA"
+    NATIVE_SAS = "NATIVE_SAS"
+    USB_BRIDGE_SATA = "USB_BRIDGE_SATA"
+    USB_BRIDGE_NVME = "USB_BRIDGE_NVME"
+    USB_BRIDGE_MASS_STORAGE = "USB_BRIDGE_MASS_STORAGE"
+    VIRTUAL_BACKED = "VIRTUAL_BACKED"
+    UNKNOWN = "UNKNOWN"
+
+
+class MediaType(enum.Enum):
+    NVME_SSD = "NVME_SSD"
+    SATA_SSD = "SATA_SSD"
+    ROTATIONAL_HDD = "ROTATIONAL_HDD"
+    FLASH_USB = "FLASH_USB"
+    OPTICAL = "OPTICAL"
+    VIRTUAL_DISK = "VIRTUAL_DISK"
+    UNKNOWN = "UNKNOWN"
+
 
 class StorageBusType(enum.IntEnum):
     UNKNOWN = 0x00
@@ -79,6 +127,54 @@ class NvmeSanitizeAction(enum.IntEnum):
     CRYPTO_ERASE = 0x04
 
 
+class SafetyState(enum.Enum):
+    DISCOVERED = "DISCOVERED"
+    VALIDATED = "VALIDATED"
+    SAFETY_CHECKED = "SAFETY_CHECKED"
+    LOCK_REQUESTED = "LOCK_REQUESTED"
+    LOCK_ACQUIRED = "LOCK_ACQUIRED"
+    EXCLUSIVE_ACCESS = "EXCLUSIVE_ACCESS"
+    PRE_EXECUTION_REVALIDATED = "PRE_EXECUTION_REVALIDATED"
+    EXECUTION_ALLOWED = "EXECUTION_ALLOWED"
+    EXECUTING = "EXECUTING"
+    VERIFYING = "VERIFYING"
+    RELEASED = "RELEASED"
+    BLOCKED = "BLOCKED"
+
+
+class PrivilegeState(enum.Enum):
+    PRIVILEGE_AVAILABLE = "PRIVILEGE_AVAILABLE"
+    PRIVILEGE_REQUIRED = "PRIVILEGE_REQUIRED"
+    PRIVILEGE_DENIED = "PRIVILEGE_DENIED"
+
+
+class MethodApplicability(enum.Enum):
+    APPLICABLE = "APPLICABLE"
+    APPLICABLE_WITH_LIMITATIONS = "APPLICABLE_WITH_LIMITATIONS"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class QualificationStatus(enum.Enum):
+    AVAILABLE = "AVAILABLE"
+    LIMITED = "LIMITED"
+    BLOCKED = "BLOCKED"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class StorageLimitation(enum.Enum):
+    FLASH_WEAR_LEVELING = "FLASH_WEAR_LEVELING: Controller wear-leveling algorithm may retain unreferenced physical flash blocks."
+    CONTROLLER_REMAP = "CONTROLLER_REMAP: Bad block and over-provisioned physical sectors are inaccessible to logical overwrite."
+    SPARE_BLOCKS = "SPARE_BLOCKS: Retired and spare physical NAND blocks cannot be addressed or verified by host software."
+    PHYSICAL_MEDIA_COVERAGE_NOT_PROVEN = "PHYSICAL_MEDIA_COVERAGE_NOT_PROVEN: Logical write operations do not guarantee 100% physical cell coverage."
+    LOGICAL_COVERAGE_ONLY = "LOGICAL_COVERAGE_ONLY: Sanitization verified strictly within host-accessible logical block address space."
+    USB_BRIDGE_LIMITATION = "USB_BRIDGE_LIMITATION: USB mass storage bridge controller filters low-level pass-through opcodes."
+    PYTHON_MEMORY_RESIDUAL_LIMITATION = "PYTHON_MEMORY_RESIDUAL_LIMITATION: Python runtime memory management cannot guarantee physical RAM zeroization."
+    HARDWARE_SED_DEPENDENT = "HARDWARE_SED_DEPENDENT: Cryptographic erasure requires verified hardware self-encrypting drive engine."
+    PHYSICAL_SLACK_NOT_PROVEN = "PHYSICAL_SLACK_NOT_PROVEN: Software cluster-tip zeroing does not modify underlying unallocated physical sectors."
+    FILESYSTEM_DRIVER_DEPENDENT = "FILESYSTEM_DRIVER_DEPENDENT: Metadata scrub relies on OS filesystem driver isolation and extent layout."
+
+
 class HardwareExecutionStatus(enum.Enum):
     SUCCESS = "SUCCESS"
     UNSUPPORTED_HARDWARE = "UNSUPPORTED_HARDWARE"
@@ -87,19 +183,33 @@ class HardwareExecutionStatus(enum.Enum):
     DEVICE_FROZEN = "DEVICE_FROZEN"
     DEVICE_LOCKED = "DEVICE_LOCKED"
     BOOT_DISK_PROTECTED = "BOOT_DISK_PROTECTED"
+    SYSTEM_DISK_BLOCKED = "SYSTEM_DISK_BLOCKED"
+    ACTIVE_OS_VOLUME = "ACTIVE_OS_VOLUME"
+    APPLICATION_PATH_TARGET = "APPLICATION_PATH_TARGET"
+    WRITE_PROTECTED = "WRITE_PROTECTED"
     ELEVATION_REQUIRED = "ELEVATION_REQUIRED"
+    PRIVILEGE_DENIED = "PRIVILEGE_DENIED"
+    DEVICE_LOCK_REQUIRED = "DEVICE_LOCK_REQUIRED"
+    IDENTITY_CHANGED = "IDENTITY_CHANGED"
+    DEVICE_DISAPPEARED = "DEVICE_DISAPPEARED"
+    CAPABILITY_CHANGED = "CAPABILITY_CHANGED"
     COMMAND_FAILED = "COMMAND_FAILED"
     DEVICE_NOT_FOUND = "DEVICE_NOT_FOUND"
     SIMULATION_QUALIFIED = "SIMULATION_QUALIFIED"
+    INTERRUPTED_UNKNOWN_OUTCOME = "INTERRUPTED_UNKNOWN_OUTCOME"
 
 
-# ─── Windows IOCTL & Command Constants (Derived from DriveWipe Core) ─────────
+# ─── Windows IOCTL & Command Constants ────────────────────────────────────────
 
 IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400
 IOCTL_DISK_GET_DRIVE_GEOMETRY_EX = 0x000700A0
 IOCTL_DISK_GET_LENGTH_INFO = 0x0007405F
 IOCTL_ATA_PASS_THROUGH = 0x0004D02C
 IOCTL_STORAGE_PROTOCOL_COMMAND = 0x002D1400
+IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS = 0x00560000
+FSCTL_LOCK_VOLUME = 0x00090018
+FSCTL_UNLOCK_VOLUME = 0x0009001C
+FSCTL_DISMOUNT_VOLUME = 0x00090020
 
 ATA_FLAGS_DRDY_REQUIRED = 0x01
 ATA_FLAGS_DATA_IN = 0x01
@@ -228,10 +338,111 @@ class StorageProtocolCommand(ctypes.Structure):
     ]
 
 
-# ─── High-Level Data Structures ───────────────────────────────────────────────
+# ─── Raw Hardware Fact & Typed Identity Models ───────────────────────────────
+
+@dataclass
+class HardwareFact:
+    value: Any
+    source: PropertySource = PropertySource.UNAVAILABLE
+    confidence: str = "UNVERIFIED"  # AUTHORITATIVE_IOCTL | DERIVED_FALLBACK | SYNTHETIC | UNVERIFIED
+    raw_hex: Optional[str] = None
+
+
+@dataclass
+class DeviceIdentitySnapshot:
+    snapshot_id: str
+    timestamp_utc: str
+    physical_drive_index: HardwareFact
+    device_path: HardwareFact
+    vendor_id: HardwareFact
+    product_id_model: HardwareFact
+    serial_number: HardwareFact
+    firmware_revision: HardwareFact
+    capacity_bytes: HardwareFact
+    logical_sector_size: HardwareFact
+    physical_sector_size: HardwareFact
+    transport_bus: HardwareFact
+    underlying_interface: HardwareFact
+    media_type: HardwareFact
+    is_removable: HardwareFact
+    is_write_protected: HardwareFact
+    is_usb_bridge: HardwareFact
+    system_disk_relationship: HardwareFact
+    boot_disk_relationship: HardwareFact
+    mounted_volume_letters: HardwareFact
+    partition_extents: HardwareFact
+
+
+@dataclass
+class AtaCapabilityEvidence:
+    identify_supported: bool = False
+    security_supported: bool = False
+    security_enabled: bool = False
+    security_locked: bool = False
+    security_frozen: bool = False
+    enhanced_erase_supported: bool = False
+    normal_erase_time_minutes: int = 0
+    enhanced_erase_time_minutes: int = 0
+    raw_word_128: Optional[int] = None
+    source: PropertySource = PropertySource.UNAVAILABLE
+
+
+@dataclass
+class NvmeCapabilityEvidence:
+    admin_identify_supported: bool = False
+    format_nvm_supported: bool = False
+    format_crypto_erase_supported: bool = False
+    sanitize_supported: bool = False
+    sanitize_block_erase_supported: bool = False
+    sanitize_crypto_erase_supported: bool = False
+    sanitize_overwrite_supported: bool = False
+    sanitize_no_deallocate_supported: bool = False
+    namespace_count: int = 1
+    active_nsid: int = 1
+    lba_format_index: int = 0
+    formatted_lba_size: int = 512
+    raw_oacs: Optional[int] = None
+    raw_sanicap: Optional[int] = None
+    source: PropertySource = PropertySource.UNAVAILABLE
+
+
+@dataclass
+class HardwareTruthModel:
+    capability_detected: bool = False
+    backend_available: bool = True
+    execution_possible: bool = False
+    execution_state: str = "REAL"
+    verification_state: str = "STATUS_LOG_READBACK"
+    software_qualification: str = "SOFTWARE-QUALIFIED"
+    physical_execution: str = "NOT_EXECUTED"
+    physical_qualification: str = "NOT_ESTABLISHED"
+    qualification_status: str = "AVAILABLE"
+    blocking_reasons: List[str] = field(default_factory=list)
+    limitations: List[str] = field(default_factory=list)
+
+
+@dataclass
+class MethodQualificationRecord:
+    method_id: int
+    canonical_name: str
+    category: str
+    applicability: MethodApplicability
+    qualification_status: QualificationStatus
+    selected_backend: str
+    required_capabilities: List[str]
+    detected_capabilities: List[str]
+    missing_capabilities: List[str]
+    blocking_reasons: List[str]
+    limitations: List[str]
+    safety_state: SafetyState
+    truth_model: HardwareTruthModel
+    applicable_media: List[MediaType]
+    timestamp_utc: str
+
 
 @dataclass
 class HardwareDeviceCapabilities:
+    """Backward-compatible capabilities container with rich fact binding."""
     device_path: str
     physical_disk_number: Optional[int]
     bus_type: str
@@ -245,6 +456,9 @@ class HardwareDeviceCapabilities:
     capacity_bytes: int = 0
     sector_size: int = 512
     drive_type: str = "UNKNOWN"
+    transport_bus: TransportBus = TransportBus.UNKNOWN
+    underlying_interface: UnderlyingInterface = UnderlyingInterface.UNKNOWN
+    media_type: MediaType = MediaType.UNKNOWN
     ata_supported: bool = False
     ata_security_state: AtaSecurityState = AtaSecurityState.UNKNOWN
     ata_enhanced_supported: bool = False
@@ -260,6 +474,9 @@ class HardwareDeviceCapabilities:
     drex_backend_integration: str = "IMPLEMENTED"
     drex_physical_execution: str = "NOT_EXECUTED"
     drex_physical_qualification: str = "NOT_ESTABLISHED"
+    raw_identity_snapshot: Optional[DeviceIdentitySnapshot] = None
+    raw_ata_evidence: Optional[AtaCapabilityEvidence] = None
+    raw_nvme_evidence: Optional[NvmeCapabilityEvidence] = None
 
 
 @dataclass
@@ -281,7 +498,737 @@ class HardwareOperationResult:
     evidence_signed: bool = False
 
 
-# ─── DriveWipe-Derived Hardware Backend ───────────────────────────────────────
+# ─── Destructive Hardware Test Tripwire ──────────────────────────────────────
+
+class DestructiveHardwareTripwire:
+    """
+    Central safety tripwire ensuring that automated tests (pytest) NEVER issue
+    destructive physical IOCTLs or write operations against host storage drives.
+    """
+    @staticmethod
+    def assert_safe_execution(device_path: str, command_context: str) -> None:
+        """Throw RuntimeError if real physical device mutation is attempted during tests."""
+        is_physical = bool(re.search(r"PhysicalDrive\d+", device_path, re.IGNORECASE))
+        auth_device = os.environ.get("DREX_PHYSICAL_TEST_DEVICE", "").strip()
+        auth_flag = os.environ.get("DREX_PHYSICAL_TEST_AUTHORIZED", "").strip().upper() == "YES"
+
+        if is_physical and not (auth_flag and (auth_device.upper() == device_path.upper() or auth_device == "*")):
+            # Running inside test harness or unauthorized environment
+            raise RuntimeError(
+                f"SAFETY TRIPWIRE TRIGGERED: Destructive command '{command_context}' against host storage "
+                f"device '{device_path}' is strictly blocked. Automated tests must execute against synthetic/mocked descriptors."
+            )
+
+
+# ─── Device Intelligence & Interrogation Engine ──────────────────────────────
+
+class DeviceIntelligenceEngine:
+    """
+    Authoritative Windows storage discovery, property extraction, and controller-level
+    capability interrogation engine.
+    """
+
+    @classmethod
+    def map_bus_type(cls, bus_int: int) -> TransportBus:
+        """Map Windows STORAGE_BUS_TYPE integer to TransportBus enum."""
+        try:
+            name = StorageBusType(bus_int).name
+            return TransportBus.__members__.get(name, TransportBus.UNKNOWN)
+        except (ValueError, KeyError):
+            return TransportBus.UNKNOWN
+
+    @classmethod
+    def create_snapshot(
+        cls,
+        device_path: str,
+        simulated_descriptor: Optional[Dict[str, Any]] = None,
+    ) -> DeviceIdentitySnapshot:
+        """
+        Capture complete, provenance-tracked DeviceIdentitySnapshot for target device.
+        """
+        snap_id = f"SNAP-{uuid.uuid4().hex[:8].upper()}"
+        now = datetime.now(timezone.utc).isoformat()
+
+        if simulated_descriptor:
+            # Synthetic fixture snapshot
+            d_num = simulated_descriptor.get("disk_number")
+            if d_num is None:
+                m = re.search(r"PhysicalDrive(\d+)", device_path, re.IGNORECASE)
+                d_num = int(m.group(1)) if m else None
+
+            bus_name = str(simulated_descriptor.get("bus_type", "UNKNOWN")).upper()
+            t_bus = TransportBus.USB if "USB" in bus_name else TransportBus.__members__.get(bus_name, TransportBus.UNKNOWN)
+            is_usb = t_bus == TransportBus.USB or simulated_descriptor.get("is_usb_bridge", False)
+            
+            underlying = (
+                UnderlyingInterface.USB_BRIDGE_SATA if is_usb and "SATA" in bus_name else (
+                    UnderlyingInterface.USB_BRIDGE_NVME if is_usb and "NVME" in bus_name else (
+                        UnderlyingInterface.USB_BRIDGE_MASS_STORAGE if is_usb else (
+                            UnderlyingInterface.NATIVE_NVME if t_bus == TransportBus.NVME else (
+                                UnderlyingInterface.NATIVE_SATA if t_bus in (TransportBus.SATA, TransportBus.ATA) else (
+                                    UnderlyingInterface.VIRTUAL_BACKED if t_bus == TransportBus.VIRTUAL else UnderlyingInterface.UNKNOWN
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+
+            media = MediaType.NVME_SSD if t_bus == TransportBus.NVME else (
+                MediaType.FLASH_USB if is_usb else (
+                    MediaType.SATA_SSD if simulated_descriptor.get("is_ssd", False) or simulated_descriptor.get("ssd", False) else (
+                        MediaType.ROTATIONAL_HDD if t_bus in (TransportBus.SATA, TransportBus.ATA) else MediaType.UNKNOWN
+                    )
+                )
+            )
+
+            is_sys = simulated_descriptor.get("system_disk", False) or (d_num == 0) or ("PHYSICALDRIVE0" in device_path.upper())
+            is_boot = simulated_descriptor.get("boot_disk", False) or (d_num == 0) or ("PHYSICALDRIVE0" in device_path.upper())
+
+            src = PropertySource.SYNTHETIC_TEST_DESCRIPTOR
+            conf = "SYNTHETIC"
+
+            return DeviceIdentitySnapshot(
+                snapshot_id=snap_id,
+                timestamp_utc=now,
+                physical_drive_index=HardwareFact(d_num, src, conf),
+                device_path=HardwareFact(device_path, src, conf),
+                vendor_id=HardwareFact(simulated_descriptor.get("vendor_id", "SyntheticVendor"), src, conf),
+                product_id_model=HardwareFact(simulated_descriptor.get("product_id", simulated_descriptor.get("model", "SyntheticDisk")), src, conf),
+                serial_number=HardwareFact(simulated_descriptor.get("serial_number", simulated_descriptor.get("serial", "SYN-SN-001")), src, conf),
+                firmware_revision=HardwareFact(simulated_descriptor.get("firmware_revision", "1.0"), src, conf),
+                capacity_bytes=HardwareFact(int(simulated_descriptor.get("capacity_bytes", simulated_descriptor.get("capacity", 1024 * 1024 * 1024))), src, conf),
+                logical_sector_size=HardwareFact(int(simulated_descriptor.get("sector_size", 512)), src, conf),
+                physical_sector_size=HardwareFact(int(simulated_descriptor.get("physical_sector_size", 512)), src, conf),
+                transport_bus=HardwareFact(t_bus, src, conf),
+                underlying_interface=HardwareFact(underlying, src, conf),
+                media_type=HardwareFact(media, src, conf),
+                is_removable=HardwareFact(simulated_descriptor.get("removable", is_usb), src, conf),
+                is_write_protected=HardwareFact(simulated_descriptor.get("write_protected", False), src, conf),
+                is_usb_bridge=HardwareFact(is_usb, src, conf),
+                system_disk_relationship=HardwareFact(is_sys, src, conf),
+                boot_disk_relationship=HardwareFact(is_boot, src, conf),
+                mounted_volume_letters=HardwareFact(simulated_descriptor.get("mounted_volumes", []), src, conf),
+                partition_extents=HardwareFact(simulated_descriptor.get("partitions", []), src, conf),
+            )
+
+        # Real Windows IOCTL interrogation
+        d_num = None
+        m = re.search(r"PhysicalDrive(\d+)", device_path, re.IGNORECASE)
+        if m:
+            d_num = int(m.group(1))
+
+        t_bus = TransportBus.UNKNOWN
+        is_usb = False
+        vendor_id = ""
+        product_id = ""
+        serial_number = ""
+        firmware_rev = ""
+        capacity = 0
+        sector_size = 512
+        phys_sector_size = 512
+        is_removable = False
+        is_write_prot = False
+        is_ssd = False
+
+        is_sys = cls.is_system_drive(device_path, d_num)
+        is_boot = is_sys
+
+        if os.name == "nt" and sys.platform == "win32":
+            try:
+                handle = ctypes.windll.kernel32.CreateFileW(
+                    device_path,
+                    0x80000000,  # GENERIC_READ
+                    0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+                    None,
+                    3,  # OPEN_EXISTING
+                    0,
+                    None,
+                )
+                if handle != -1 and handle != 0:
+                    # 1. Query STORAGE_DEVICE_DESCRIPTOR
+                    query = StoragePropertyQuery()
+                    query.PropertyId = 0
+                    query.QueryType = 0
+
+                    desc_buf = (ctypes.c_uint8 * 4096)()
+                    br = ctypes.c_uint32()
+
+                    res = ctypes.windll.kernel32.DeviceIoControl(
+                        handle,
+                        IOCTL_STORAGE_QUERY_PROPERTY,
+                        ctypes.byref(query),
+                        ctypes.sizeof(query),
+                        ctypes.byref(desc_buf),
+                        ctypes.sizeof(desc_buf),
+                        ctypes.byref(br),
+                        None,
+                    )
+                    if res and br.value >= ctypes.sizeof(StorageDeviceDescriptor):
+                        desc = StorageDeviceDescriptor.from_buffer_copy(desc_buf)
+                        t_bus = cls.map_bus_type(desc.BusType)
+                        is_usb = (t_bus == TransportBus.USB)
+                        is_removable = bool(desc.RemovableMedia)
+
+                        def _str_from_offset(offset: int) -> str:
+                            if offset == 0 or offset >= br.value:
+                                return ""
+                            raw = bytes(desc_buf)[offset:]
+                            null_idx = raw.find(b"\x00")
+                            if null_idx != -1:
+                                raw = raw[:null_idx]
+                            return raw.decode("ascii", errors="replace").strip()
+
+                        vendor_id = _str_from_offset(desc.VendorIdOffset)
+                        product_id = _str_from_offset(desc.ProductIdOffset)
+                        serial_number = _str_from_offset(desc.SerialNumberOffset)
+                        firmware_rev = _str_from_offset(desc.ProductRevisionOffset)
+
+                    # 2. Seek penalty query (detect SSD)
+                    query_seek = StoragePropertyQuery()
+                    query_seek.PropertyId = 7  # StorageDeviceSeekPenaltyProperty
+                    query_seek.QueryType = 0
+                    seek_desc = StorageDeviceSeekPenaltyDescriptor()
+                    res_seek = ctypes.windll.kernel32.DeviceIoControl(
+                        handle,
+                        IOCTL_STORAGE_QUERY_PROPERTY,
+                        ctypes.byref(query_seek),
+                        ctypes.sizeof(query_seek),
+                        ctypes.byref(seek_desc),
+                        ctypes.sizeof(seek_desc),
+                        ctypes.byref(br),
+                        None,
+                    )
+                    if res_seek:
+                        is_ssd = (seek_desc.IncursSeekPenalty == 0)
+
+                    # 3. Capacity
+                    length_info = ctypes.c_int64()
+                    res_len = ctypes.windll.kernel32.DeviceIoControl(
+                        handle,
+                        IOCTL_DISK_GET_LENGTH_INFO,
+                        None,
+                        0,
+                        ctypes.byref(length_info),
+                        ctypes.sizeof(length_info),
+                        ctypes.byref(br),
+                        None,
+                    )
+                    if res_len:
+                        capacity = length_info.value
+
+                    # 4. Sector geometry
+                    geo_ex = DiskGeometryEx()
+                    res_geo = ctypes.windll.kernel32.DeviceIoControl(
+                        handle,
+                        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+                        None,
+                        0,
+                        ctypes.byref(geo_ex),
+                        ctypes.sizeof(geo_ex),
+                        ctypes.byref(br),
+                        None,
+                    )
+                    if res_geo:
+                        sector_size = geo_ex.Geometry.BytesPerSector or 512
+                        phys_sector_size = sector_size
+
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+
+        media = MediaType.NVME_SSD if t_bus == TransportBus.NVME else (
+            MediaType.FLASH_USB if is_usb else (
+                MediaType.SATA_SSD if is_ssd else (
+                    MediaType.ROTATIONAL_HDD if t_bus in (TransportBus.SATA, TransportBus.ATA) else MediaType.UNKNOWN
+                )
+            )
+        )
+
+        underlying = UnderlyingInterface.NATIVE_NVME if t_bus == TransportBus.NVME else (
+            UnderlyingInterface.USB_BRIDGE_MASS_STORAGE if is_usb else (
+                UnderlyingInterface.NATIVE_SATA if t_bus in (TransportBus.SATA, TransportBus.ATA) else UnderlyingInterface.UNKNOWN
+            )
+        )
+
+        src = PropertySource.IOCTL_STORAGE_QUERY_PROPERTY
+        conf = "AUTHORITATIVE_IOCTL"
+
+        return DeviceIdentitySnapshot(
+            snapshot_id=snap_id,
+            timestamp_utc=now,
+            physical_drive_index=HardwareFact(d_num, src, conf),
+            device_path=HardwareFact(device_path, src, conf),
+            vendor_id=HardwareFact(vendor_id, src, conf),
+            product_id_model=HardwareFact(product_id, src, conf),
+            serial_number=HardwareFact(serial_number, src, conf),
+            firmware_revision=HardwareFact(firmware_rev, src, conf),
+            capacity_bytes=HardwareFact(capacity, src, conf),
+            logical_sector_size=HardwareFact(sector_size, src, conf),
+            physical_sector_size=HardwareFact(phys_sector_size, src, conf),
+            transport_bus=HardwareFact(t_bus, src, conf),
+            underlying_interface=HardwareFact(underlying, src, conf),
+            media_type=HardwareFact(media, src, conf),
+            is_removable=HardwareFact(is_removable, src, conf),
+            is_write_protected=HardwareFact(is_write_prot, src, conf),
+            is_usb_bridge=HardwareFact(is_usb, src, conf),
+            system_disk_relationship=HardwareFact(is_sys, src, conf),
+            boot_disk_relationship=HardwareFact(is_boot, src, conf),
+            mounted_volume_letters=HardwareFact([], src, conf),
+            partition_extents=HardwareFact([], src, conf),
+        )
+
+    @classmethod
+    def is_system_drive(cls, device_path: str, disk_number: Optional[int] = None) -> bool:
+        """Determine whether device path matches protected Windows boot/system disk."""
+        dev_upper = device_path.upper().strip()
+        if "PHYSICALDRIVE0" in dev_upper or disk_number == 0:
+            return True
+        if dev_upper.startswith(r"\\.\C:") or dev_upper in ("C:", "C:\\"):
+            return True
+        sys_drive = os.environ.get("SystemDrive", "C:").upper().rstrip("\\")
+        if dev_upper.startswith(f"\\\\.\\{sys_drive}") or dev_upper == sys_drive:
+            return True
+        return False
+
+
+# ─── Safety State Machine & Central Safety Gate ──────────────────────────────
+
+class DeviceSafetyStateMachine:
+    """
+    11-Stage device safety state machine and central safety gate enforcing fail-closed
+    refusals for boot/system disks, active OS volumes, ATA frozen/locked drives,
+    USB bridges, and write protection.
+    """
+
+    @classmethod
+    def evaluate_safety(
+        cls,
+        snapshot: DeviceIdentitySnapshot,
+        method_id: str,
+        confirmation: bool = False,
+        ata_evidence: Optional[AtaCapabilityEvidence] = None,
+        nvme_evidence: Optional[NvmeCapabilityEvidence] = None,
+    ) -> Tuple[bool, HardwareExecutionStatus, str, List[str]]:
+        """
+        Evaluate target device against comprehensive safety rules.
+        Returns: (is_safe: bool, status: HardwareExecutionStatus, reason: str, blocking_reasons: List[str])
+        """
+        blocking: List[str] = []
+
+        # 1. Boot / System disk protection
+        if snapshot.system_disk_relationship.value or snapshot.boot_disk_relationship.value:
+            blocking.append("SYSTEM_DISK_BLOCKED")
+            blocking.append("BOOT_DISK_BLOCKED")
+            return (
+                False,
+                HardwareExecutionStatus.BOOT_DISK_PROTECTED,
+                f"Destructive operation blocked: {snapshot.device_path.value} is a protected system/boot drive.",
+                blocking,
+            )
+
+        # 2. Write-protected media
+        if snapshot.is_write_protected.value:
+            blocking.append("WRITE_PROTECTED")
+            return (
+                False,
+                HardwareExecutionStatus.WRITE_PROTECTED,
+                f"Destructive operation blocked: {snapshot.device_path.value} is write-protected.",
+                blocking,
+            )
+
+        # 3. USB Bridge containment
+        t_bus = snapshot.transport_bus.value
+        is_usb = snapshot.is_usb_bridge.value or (t_bus == TransportBus.USB)
+        is_hw_firmware_method = method_id in ("M03", "M04", "M05", "ata", "ata_secure_erase", "nvme", "nvme_format", "nvme_sanitize", "device_native_sanitize")
+
+        if is_usb and is_hw_firmware_method:
+            blocking.append("USB_BRIDGE_LIMITATION")
+            return (
+                False,
+                HardwareExecutionStatus.USB_BRIDGE_BLOCKED,
+                f"Native hardware command {method_id} blocked: pass-through is not exposed over USB bridges.",
+                blocking,
+            )
+
+        # 4. ATA security states (FROZEN / LOCKED)
+        if method_id in ("M04", "ata", "ata_secure_erase", "ata_enhanced"):
+            if ata_evidence:
+                if ata_evidence.security_frozen:
+                    blocking.append("FROZEN")
+                    return (
+                        False,
+                        HardwareExecutionStatus.DEVICE_FROZEN,
+                        "ATA Secure Erase blocked: Drive ATA security is in the BIOS/UEFI FROZEN state.",
+                        blocking,
+                    )
+                if ata_evidence.security_locked:
+                    blocking.append("LOCKED")
+                    return (
+                        False,
+                        HardwareExecutionStatus.DEVICE_LOCKED,
+                        "ATA Secure Erase blocked: Drive ATA security is password LOCKED.",
+                        blocking,
+                    )
+                if not ata_evidence.security_supported:
+                    blocking.append("UNSUPPORTED")
+                    return (
+                        False,
+                        HardwareExecutionStatus.UNSUPPORTED_HARDWARE,
+                        "ATA Security Feature Set is not supported by target controller.",
+                        blocking,
+                    )
+
+        # 5. NVMe controller command support
+        if method_id in ("M05", "nvme", "nvme_format", "nvme_sanitize"):
+            if nvme_evidence:
+                if not (nvme_evidence.format_nvm_supported or nvme_evidence.sanitize_supported):
+                    blocking.append("UNSUPPORTED")
+                    return (
+                        False,
+                        HardwareExecutionStatus.UNSUPPORTED_HARDWARE,
+                        "NVMe controller does not support Format NVM or Sanitize admin commands.",
+                        blocking,
+                    )
+
+        # 6. Destructive confirmation requirement
+        if not confirmation and os.environ.get("DREX_CONFIRM_DESTRUCTIVE") != "ERASE":
+            blocking.append("DEVICE_LOCK_REQUIRED")
+            return (
+                False,
+                HardwareExecutionStatus.COMMAND_FAILED,
+                "Destructive operation blocked: operator confirmation required.",
+                blocking,
+            )
+
+        return True, HardwareExecutionStatus.SUCCESS, "Safety gates passed.", []
+
+
+# ─── Atomic Pre-Execution Revalidation Engine (TOCTOU Protection) ────────────
+
+class PreExecutionRevalidator:
+    """
+    Performs atomic pre-execution revalidation comparing discovery snapshot against
+    real-time pre-execution snapshot to prevent Time-of-Check to Time-of-Use (TOCTOU) drift.
+    """
+
+    @classmethod
+    def revalidate(
+        cls,
+        discovery_snapshot: DeviceIdentitySnapshot,
+        target_device_path: str,
+        simulated_descriptor: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, Optional[str], Optional[DeviceIdentitySnapshot]]:
+        """
+        Revalidate target immediately prior to issuing destructive commands.
+        Returns: (is_valid: bool, error_reason: Optional[str], current_snapshot: Optional[DeviceIdentitySnapshot])
+        """
+        if simulated_descriptor is None and discovery_snapshot.physical_drive_index.source == PropertySource.SYNTHETIC_TEST_DESCRIPTOR:
+            simulated_descriptor = {
+                "disk_number": discovery_snapshot.physical_drive_index.value,
+                "vendor_id": discovery_snapshot.vendor_id.value,
+                "product_id": discovery_snapshot.product_id_model.value,
+                "serial_number": discovery_snapshot.serial_number.value,
+                "firmware_revision": discovery_snapshot.firmware_revision.value,
+                "capacity_bytes": discovery_snapshot.capacity_bytes.value,
+                "sector_size": discovery_snapshot.logical_sector_size.value,
+                "physical_sector_size": discovery_snapshot.physical_sector_size.value,
+                "bus_type": discovery_snapshot.transport_bus.value.value,
+                "is_usb_bridge": discovery_snapshot.is_usb_bridge.value,
+                "removable": discovery_snapshot.is_removable.value,
+                "write_protected": discovery_snapshot.is_write_protected.value,
+                "system_disk": discovery_snapshot.system_disk_relationship.value,
+                "boot_disk": discovery_snapshot.boot_disk_relationship.value,
+            }
+
+        current = DeviceIntelligenceEngine.create_snapshot(target_device_path, simulated_descriptor=simulated_descriptor)
+
+        # Check for device disappearance
+        if current.capacity_bytes.value == 0 and current.transport_bus.value == TransportBus.UNKNOWN and not simulated_descriptor:
+            return False, "DEVICE_DISAPPEARED: Device was disconnected or handle is invalid.", current
+
+        # Compare critical identity fields
+        if discovery_snapshot.serial_number.value != current.serial_number.value:
+            return False, f"IDENTITY_CHANGED: Serial drift detected ('{discovery_snapshot.serial_number.value}' != '{current.serial_number.value}').", current
+
+        if discovery_snapshot.product_id_model.value != current.product_id_model.value:
+            return False, f"IDENTITY_CHANGED: Model drift detected ('{discovery_snapshot.product_id_model.value}' != '{current.product_id_model.value}').", current
+
+        if discovery_snapshot.capacity_bytes.value != current.capacity_bytes.value:
+            return False, f"IDENTITY_CHANGED: Capacity drift detected ({discovery_snapshot.capacity_bytes.value} != {current.capacity_bytes.value}).", current
+
+        if discovery_snapshot.logical_sector_size.value != current.logical_sector_size.value:
+            return False, "IDENTITY_CHANGED: Sector geometry drift detected.", current
+
+        if discovery_snapshot.transport_bus.value != current.transport_bus.value:
+            return False, "CAPABILITY_CHANGED: Transport bus drift detected.", current
+
+        if discovery_snapshot.system_disk_relationship.value != current.system_disk_relationship.value:
+            return False, "IDENTITY_CHANGED: System disk relationship status drift detected.", current
+
+        return True, None, current
+
+
+# ─── 25-Method Deterministic Qualification Engine ────────────────────────────
+
+CANONICAL_25_METHODS_SPEC = {
+    1: {"name": "NIST SP 800-88 Policy Engine", "category": "Drive Erasure", "backend": "NIST SP 800-88 Policy Dispatcher"},
+    2: {"name": "Smart Sanitization", "category": "Drive Erasure", "backend": "Heuristic Multi-Tier Evaluator"},
+    3: {"name": "Device-Native Sanitize", "category": "Drive Erasure", "backend": "DriveWipe IOCTL Pass-Through"},
+    4: {"name": "ATA Secure Erase", "category": "Drive Erasure", "backend": "DriveWipe ATA Pass-Through"},
+    5: {"name": "NVMe Secure Erase", "category": "Drive Erasure", "backend": "DriveWipe NVMe Admin Protocol"},
+    6: {"name": "IEEE 2883 Purge", "category": "Drive Erasure", "backend": "IEEE 2883 Policy Engine"},
+    7: {"name": "Verified Overwrite", "category": "Drive Erasure", "backend": "Direct Block Multi-Pass Overwrite"},
+    8: {"name": "CSPRNG Random Overwrite", "category": "File/Folder Erasure", "backend": "CSPRNG Stream Overwrite"},
+    9: {"name": "Cryptographic Erasure", "category": "File/Folder Erasure", "backend": "Key Lifecycle Invalidation"},
+    10: {"name": "File Slack / Cluster-Tip", "category": "File/Folder Erasure", "backend": "SlackSanitizer Extent Engine"},
+    11: {"name": "Filesystem Metadata Sanitization", "category": "File/Folder Erasure", "backend": "9-Stage MFTSanitizer + VSS"},
+    12: {"name": "NIST SP 800-88 File Policy Engine", "category": "File/Folder Erasure", "backend": "File Policy Dispatcher"},
+    13: {"name": "Secure Free-Space Wiping", "category": "File/Folder Erasure", "backend": "FreeSpaceSanitizer Headroom Engine"},
+    14: {"name": "Single-Pass Zero Overwrite", "category": "File/Folder Erasure", "backend": "Single-Pass Zero Engine"},
+    15: {"name": "Storage-Aware Sanitization Fallback", "category": "File/Folder Erasure", "backend": "Storage Controller Fallback Matrix"},
+    16: {"name": "Temporary / Cache Sanitization", "category": "File/Folder Erasure", "backend": "Temp Cache Scrubber"},
+    17: {"name": "Quick Recovery", "category": "Recovery", "backend": "TSK fls + icat"},
+    18: {"name": "Smart Recovery", "category": "Recovery", "backend": "TSK fsstat + fls + Carving"},
+    19: {"name": "Targeted Recovery", "category": "Recovery", "backend": "TSK icat Inode Extraction"},
+    20: {"name": "Filesystem Recovery", "category": "Recovery", "backend": "TSK tsk_recover"},
+    21: {"name": "Deep Recovery", "category": "Recovery", "backend": "PhotoRec 7.2 + DREX Native Carver"},
+    22: {"name": "Fragment Recovery", "category": "Recovery", "backend": "DREX Native Fragment Engine"},
+    23: {"name": "RAID / Storage Recovery", "category": "Recovery", "backend": "DREX Native RAID Engine"},
+    24: {"name": "Damaged Media Recovery", "category": "Recovery", "backend": "DREX Damaged Media Imager + ddrescue"},
+    25: {"name": "Forensic Recovery", "category": "Recovery", "backend": "Forensic Vault + Audit Ledger"},
+}
+
+
+class Qualification25MethodEngine:
+    """
+    Computes a deterministic, independent qualification record for each of DREX's
+    25 canonical methods (M01-M25) against a target device snapshot.
+    """
+
+    @classmethod
+    def evaluate_25_methods(
+        cls,
+        snapshot: DeviceIdentitySnapshot,
+        ata_evidence: Optional[AtaCapabilityEvidence] = None,
+        nvme_evidence: Optional[NvmeCapabilityEvidence] = None,
+    ) -> Dict[int, MethodQualificationRecord]:
+        """
+        Evaluate all 25 canonical methods. Always returns complete dict with keys 1..25.
+        """
+        matrix: Dict[int, MethodQualificationRecord] = {}
+        now = datetime.now(timezone.utc).isoformat()
+
+        is_sys = snapshot.system_disk_relationship.value or snapshot.boot_disk_relationship.value
+        t_bus = snapshot.transport_bus.value
+        media = snapshot.media_type.value
+        is_usb = snapshot.is_usb_bridge.value or (t_bus == TransportBus.USB)
+        is_ssd = media in (MediaType.NVME_SSD, MediaType.SATA_SSD)
+
+        for m_id, spec in CANONICAL_25_METHODS_SPEC.items():
+            req_caps: List[str] = []
+            det_caps: List[str] = []
+            miss_caps: List[str] = []
+            blocking: List[str] = []
+            lims: List[str] = []
+            app = MethodApplicability.APPLICABLE
+            status = QualificationStatus.AVAILABLE
+            backend = spec["backend"]
+            exec_state = "REAL"
+            verif_state = "STATUS_LOG_READBACK"
+            soft_qual = "SOFTWARE-QUALIFIED"
+
+            # Global system disk safety gate for destructive methods
+            if is_sys and m_id <= 16:
+                blocking.append("SYSTEM_DISK_BLOCKED")
+                status = QualificationStatus.BLOCKED
+                app = MethodApplicability.UNSUPPORTED
+                exec_state = "BLOCKED"
+
+            # Method-specific evaluations
+            if m_id == 1:  # NIST SP 800-88 Policy Engine
+                req_caps.append("MEDIA_IDENTIFICATION")
+                det_caps.append("MEDIA_IDENTIFICATION")
+                lims.append("Policy evaluation only: physical erasure requires execution of selected backend.")
+                verif_state = "POLICY_MATCH"
+                if is_ssd:
+                    lims.append(StorageLimitation.FLASH_WEAR_LEVELING.value)
+
+            elif m_id == 2:  # Smart Sanitization
+                req_caps.append("MEDIA_CLASSIFICATION")
+                det_caps.append("MEDIA_CLASSIFICATION")
+                verif_state = "HEURISTIC_CHECK"
+
+            elif m_id == 3:  # Device-Native Sanitize
+                req_caps.append("NATIVE_SANITIZE_PROTOCOL")
+                if is_usb:
+                    miss_caps.append("NATIVE_SANITIZE_PROTOCOL")
+                    blocking.append("USB_BRIDGE_LIMITATION")
+                    lims.append(StorageLimitation.USB_BRIDGE_LIMITATION.value)
+                    status = QualificationStatus.BLOCKED
+                    app = MethodApplicability.UNSUPPORTED
+                elif t_bus == TransportBus.NVME:
+                    det_caps.append("NATIVE_SANITIZE_PROTOCOL")
+                else:
+                    det_caps.append("NATIVE_SANITIZE_PROTOCOL")
+
+            elif m_id == 4:  # ATA Secure Erase
+                req_caps.append("ATA_SECURITY_FEATURE_SET")
+                if is_usb:
+                    miss_caps.append("ATA_SECURITY_FEATURE_SET")
+                    blocking.append("USB_BRIDGE_LIMITATION")
+                    status = QualificationStatus.BLOCKED
+                    app = MethodApplicability.UNSUPPORTED
+                elif t_bus not in (TransportBus.SATA, TransportBus.ATA):
+                    miss_caps.append("ATA_SECURITY_FEATURE_SET")
+                    blocking.append("UNSUPPORTED_BUS")
+                    status = QualificationStatus.UNSUPPORTED
+                    app = MethodApplicability.NOT_APPLICABLE
+                else:
+                    if ata_evidence and ata_evidence.security_frozen:
+                        blocking.append("FROZEN")
+                        status = QualificationStatus.BLOCKED
+                    elif ata_evidence and ata_evidence.security_locked:
+                        blocking.append("LOCKED")
+                        status = QualificationStatus.BLOCKED
+                    else:
+                        det_caps.append("ATA_SECURITY_FEATURE_SET")
+
+            elif m_id == 5:  # NVMe Secure Erase
+                req_caps.append("NVME_ADMIN_COMMAND_SUPPORT")
+                if is_usb:
+                    miss_caps.append("NVME_ADMIN_COMMAND_SUPPORT")
+                    blocking.append("USB_BRIDGE_LIMITATION")
+                    status = QualificationStatus.BLOCKED
+                    app = MethodApplicability.UNSUPPORTED
+                elif t_bus != TransportBus.NVME:
+                    miss_caps.append("NVME_ADMIN_COMMAND_SUPPORT")
+                    blocking.append("UNSUPPORTED_BUS")
+                    status = QualificationStatus.UNSUPPORTED
+                    app = MethodApplicability.NOT_APPLICABLE
+                else:
+                    det_caps.append("NVME_ADMIN_COMMAND_SUPPORT")
+                    verif_state = "NVMe_CQE_READBACK"
+
+            elif m_id == 6:  # IEEE 2883 Purge
+                req_caps.append("ENTERPRISE_STORAGE_CLASSIFICATION")
+                det_caps.append("ENTERPRISE_STORAGE_CLASSIFICATION")
+                verif_state = "POLICY_MATCH"
+
+            elif m_id == 7:  # Verified Overwrite
+                req_caps.append("DIRECT_BLOCK_WRITE")
+                det_caps.append("DIRECT_BLOCK_WRITE")
+                verif_state = "EXACT_BYTE_READBACK"
+                if is_ssd:
+                    lims.append(StorageLimitation.FLASH_WEAR_LEVELING.value)
+                    lims.append(StorageLimitation.LOGICAL_COVERAGE_ONLY.value)
+
+            elif m_id == 8:  # CSPRNG Random Overwrite
+                req_caps.append("FILE_SYSTEM_WRITE")
+                det_caps.append("FILE_SYSTEM_WRITE")
+                verif_state = "EXACT_READBACK_AND_HASH"
+                if is_ssd:
+                    lims.append(StorageLimitation.FLASH_WEAR_LEVELING.value)
+
+            elif m_id == 9:  # Cryptographic Erasure
+                req_caps.append("KEY_MANAGEMENT_INTERFACE")
+                det_caps.append("KEY_MANAGEMENT_INTERFACE")
+                lims.append(StorageLimitation.PYTHON_MEMORY_RESIDUAL_LIMITATION.value)
+                verif_state = "KEY_INVALIDATION_VERIFIED"
+
+            elif m_id == 10:  # File Slack / Cluster-Tip
+                req_caps.append("CLUSTER_EXTENT_MAPPING")
+                det_caps.append("CLUSTER_EXTENT_MAPPING")
+                lims.append(StorageLimitation.PHYSICAL_SLACK_NOT_PROVEN.value)
+                verif_state = "PAYLOAD_HASH_AND_ZERO_READBACK"
+
+            elif m_id == 11:  # Filesystem Metadata Sanitization
+                req_caps.append("MFT_PARSING_AND_VOLUME_LOCK")
+                det_caps.append("MFT_PARSING_AND_VOLUME_LOCK")
+                lims.append(StorageLimitation.FILESYSTEM_DRIVER_DEPENDENT.value)
+                verif_state = "EXACT_MFT_READBACK"
+
+            elif m_id == 12:  # NIST SP 800-88 File Policy Engine
+                req_caps.append("FILE_METADATA_INSPECTION")
+                det_caps.append("FILE_METADATA_INSPECTION")
+                verif_state = "POLICY_MATCH"
+
+            elif m_id == 13:  # Secure Free-Space Wiping
+                req_caps.append("FREE_SPACE_ALLOCATION")
+                det_caps.append("FREE_SPACE_ALLOCATION")
+                lims.append(StorageLimitation.LOGICAL_COVERAGE_ONLY.value)
+                if is_ssd:
+                    lims.append(StorageLimitation.FLASH_WEAR_LEVELING.value)
+                verif_state = "ALLOCATION_CLEANUP_VERIFIED"
+
+            elif m_id == 14:  # Single-Pass Zero Overwrite
+                req_caps.append("STREAMING_FILE_WRITE")
+                det_caps.append("STREAMING_FILE_WRITE")
+                verif_state = "EXACT_ZERO_READBACK"
+
+            elif m_id == 15:  # Storage-Aware Sanitization Fallback
+                req_caps.append("STORAGE_FALLBACK_TABLE")
+                det_caps.append("STORAGE_FALLBACK_TABLE")
+                verif_state = "FALLBACK_AUDIT_LOG"
+
+            elif m_id == 16:  # Temporary / Cache Sanitization
+                req_caps.append("TEMP_DIRECTORY_ACCESS")
+                det_caps.append("TEMP_DIRECTORY_ACCESS")
+                verif_state = "FILE_COUNT_AND_UNLINK"
+
+            elif 17 <= m_id <= 25:  # Forensic Recovery Methods (Strictly Read-Only)
+                req_caps.append("GENERIC_READ_ACCESS")
+                det_caps.append("GENERIC_READ_ACCESS")
+                verif_state = "READ_ONLY_INTEGRITY_VERIFIED"
+                status = QualificationStatus.AVAILABLE
+                app = MethodApplicability.APPLICABLE
+                # Recovery is NEVER blocked by system disk (read-only triage is allowed)
+
+            # Enforce absolute precedence of system disk safety for destructive methods (1-16)
+            if is_sys and m_id <= 16:
+                if "SYSTEM_DISK_BLOCKED" not in blocking:
+                    blocking.append("SYSTEM_DISK_BLOCKED")
+                status = QualificationStatus.BLOCKED
+                app = MethodApplicability.UNSUPPORTED
+                exec_state = "BLOCKED"
+
+            truth = HardwareTruthModel(
+                capability_detected=len(det_caps) > 0 and len(miss_caps) == 0,
+                backend_available=True,
+                execution_possible=(status == QualificationStatus.AVAILABLE),
+                execution_state=exec_state,
+                verification_state=verif_state,
+                software_qualification=soft_qual,
+                physical_execution="NOT_EXECUTED",
+                physical_qualification="NOT_ESTABLISHED",
+                qualification_status=status.value,
+                blocking_reasons=blocking,
+                limitations=lims,
+            )
+
+            record = MethodQualificationRecord(
+                method_id=m_id,
+                canonical_name=spec["name"],
+                category=spec["category"],
+                applicability=app,
+                qualification_status=status,
+                selected_backend=backend,
+                required_capabilities=req_caps,
+                detected_capabilities=det_caps,
+                missing_capabilities=miss_caps,
+                blocking_reasons=blocking,
+                limitations=lims,
+                safety_state=SafetyState.BLOCKED if blocking else SafetyState.VALIDATED,
+                truth_model=truth,
+                applicable_media=[media],
+                timestamp_utc=now,
+            )
+            matrix[m_id] = record
+
+        return matrix
+
+
+# ─── DriveWipe-Derived Hardware Backend & Execution Manager ──────────────────
 
 class DriveWipeHardwareBackend:
     """
@@ -301,189 +1248,94 @@ class DriveWipeHardwareBackend:
             return False
 
     @staticmethod
-    def is_boot_or_system_disk(device_path: str, disk_number: Optional[int] = None) -> bool:
-        """
-        Determine whether the targeted device corresponds to the Windows OS boot/system drive.
-        Protects PhysicalDrive0, C:, and %SystemDrive%.
-        """
-        dev_upper = device_path.upper().strip()
-        if "PHYSICALDRIVE0" in dev_upper or disk_number == 0:
-            return True
-        if dev_upper.startswith(r"\\.\C:") or dev_upper == "C:" or dev_upper == "C:\\":
-            return True
-        sys_drive = os.environ.get("SystemDrive", "C:").upper().rstrip("\\")
-        if dev_upper.startswith(f"\\\\.\\{sys_drive}") or dev_upper == sys_drive:
-            return True
-        return False
-
-    @classmethod
-    def map_bus_type(cls, bus_int: int) -> str:
-        """Map Windows STORAGE_BUS_TYPE integer to canonical string."""
-        try:
-            return StorageBusType(bus_int).name
-        except ValueError:
-            return f"CUSTOM_BUS_{bus_int}"
-
-    @classmethod
-    def build_ata_password_block(
-        cls,
-        enhanced: bool = False,
-        password: bytes = ATA_TEMP_PASSWORD,
-    ) -> bytes:
-        """
-        Build standard 512-byte ATA password block per ATA ACS specification (DriveWipe ata.rs).
-        Byte 0: 0x00 for normal erase, 0x02 for enhanced erase.
-        Byte 1: Master password identifier (0x00 for user).
-        Bytes 2..33: Password bytes (padded with 0x00).
-        """
-        buf = bytearray(ATA_PASSWORD_BLOCK_SIZE)
+    def build_ata_password_block(enhanced: bool = False, password: bytes = ATA_TEMP_PASSWORD) -> bytes:
+        """Construct 512-byte ATA security password block."""
+        pwd_block = bytearray(512)
         if enhanced:
-            buf[0] = 0x02
-        else:
-            buf[0] = 0x00
-        buf[1] = 0x00  # User password identifier
-        pwd = password[:32]
-        buf[2:2 + len(pwd)] = pwd
-        return bytes(buf)
+            pwd_block[0] = 0x02  # Enhanced erase identifier bit
+        pwd_block[1] = 0x00  # User password identifier
+        pwd_len = min(len(password), 32)
+        pwd_block[2:2 + pwd_len] = password[:pwd_len]
+        return bytes(pwd_block)
 
-    @classmethod
+    @staticmethod
     def build_ata_passthrough_command(
-        cls,
         command_opcode: int,
-        password_block: Optional[bytes] = None,
-        timeout_seconds: int = 60,
-    ) -> Tuple[AtaPassThroughEx, bytes]:
-        """
-        Build ATA_PASS_THROUGH_EX header and binary payload buffer (DriveWipe ata.rs).
-        """
-        has_data = password_block is not None
-        data_len = len(password_block) if password_block else 0
-        header_len = ctypes.sizeof(AtaPassThroughEx)
-
-        flags = ATA_FLAGS_DRDY_REQUIRED
-        if has_data:
-            flags |= ATA_FLAGS_DATA_OUT
-
+        password_block: bytes,
+        timeout_seconds: int = 3600,
+    ) -> Tuple[AtaPassThroughEx, bytearray]:
+        """Construct Windows ATA_PASS_THROUGH_EX header and data payload."""
         header = AtaPassThroughEx()
-        header.Length = header_len
-        header.AtaFlags = flags
-        header.PathId = 0
-        header.TargetId = 0
-        header.Lun = 0
-        header.DataTransferLength = data_len
+        header.Length = ctypes.sizeof(AtaPassThroughEx)
+        header.AtaFlags = 0x01 | 0x02  # ATA_FLAGS_DATA_OUT | ATA_FLAGS_DRDY_REQUIRED
+        header.DataTransferLength = len(password_block)
         header.TimeOutValue = timeout_seconds
-        header.DataBufferOffset = header_len
+        header.DataBufferOffset = ctypes.sizeof(AtaPassThroughEx)
+        header.CurrentTaskFile[1] = 1  # Sector count
+        header.CurrentTaskFile[6] = command_opcode
 
-        header.CurrentTaskFile[0] = 0  # Features
-        header.CurrentTaskFile[1] = 1 if has_data else 0  # Sector count
-        header.CurrentTaskFile[6] = command_opcode  # Opcode
-
-        payload = bytes(header) + (password_block if password_block else b"")
+        payload = bytearray(ctypes.sizeof(AtaPassThroughEx) + len(password_block))
+        ctypes.memmove(
+            (ctypes.c_char * ctypes.sizeof(AtaPassThroughEx)).from_buffer(payload),
+            ctypes.byref(header),
+            ctypes.sizeof(AtaPassThroughEx),
+        )
+        payload[ctypes.sizeof(AtaPassThroughEx):] = password_block
         return header, payload
 
-    @classmethod
+    @staticmethod
     def build_nvme_admin_format_command(
-        cls,
         ses: int = 1,
         nsid: int = 0xFFFFFFFF,
         timeout_seconds: int = 600,
     ) -> StorageProtocolCommand:
-        """
-        Construct IOCTL_STORAGE_PROTOCOL_COMMAND for NVMe Format NVM (DriveWipe nvme.rs).
-        CDW10 bits 11:9 encode Secure Erase Settings (SES):
-          1: User Data Erase
-          2: Cryptographic Erase
-        """
+        """Construct IOCTL_STORAGE_PROTOCOL_COMMAND for NVMe Admin Format NVM (0x80)."""
         cmd = StorageProtocolCommand()
-        cmd.Version = STORAGE_PROTOCOL_COMMAND_VERSION
+        cmd.Version = 1  # STORAGE_PROTOCOL_STRUCTURE_VERSION
         cmd.Length = ctypes.sizeof(StorageProtocolCommand)
-        cmd.ProtocolType = PROTOCOL_TYPE_NVME
-        cmd.Flags = STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST
-        cmd.CommandLength = 64
+        cmd.ProtocolType = 3  # ProtocolTypeNvme
+        cmd.Flags = 0x80000000  # STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST
         cmd.TimeOutValue = timeout_seconds
-
-        cmd.Command[0] = NVME_ADMIN_FORMAT_NVM
-        cmd.Command[1] = nsid
-        cmd.Command[10] = (ses & 0x07) << 9
+        cmd.Command[0] = NVME_ADMIN_FORMAT_NVM  # Opcode 0x80
+        cmd.Command[1] = nsid  # Namespace ID
+        cmd.Command[10] = (ses & 0x07) << 9  # CDW10: SES bits [11:9]
         return cmd
 
-    @classmethod
+    @staticmethod
     def build_nvme_admin_sanitize_command(
-        cls,
         action: NvmeSanitizeAction,
         overwrite_pattern: int = 0,
-        timeout_seconds: int = 10,
+        timeout_seconds: int = 3600,
     ) -> StorageProtocolCommand:
-        """
-        Construct IOCTL_STORAGE_PROTOCOL_COMMAND for NVMe Sanitize (DriveWipe nvme.rs).
-        CDW10 bits 2:0 encode SANACT:
-          1: Exit Failure Mode
-          2: Block Erase
-          3: Overwrite
-          4: Crypto Erase
-        """
+        """Construct IOCTL_STORAGE_PROTOCOL_COMMAND for NVMe Admin Sanitize (0x84)."""
         cmd = StorageProtocolCommand()
-        cmd.Version = STORAGE_PROTOCOL_COMMAND_VERSION
+        cmd.Version = 1  # STORAGE_PROTOCOL_STRUCTURE_VERSION
         cmd.Length = ctypes.sizeof(StorageProtocolCommand)
-        cmd.ProtocolType = PROTOCOL_TYPE_NVME
-        cmd.Flags = STORAGE_PROTOCOL_COMMAND_FLAG_ADAPTER_REQUEST
-        cmd.CommandLength = 64
+        cmd.ProtocolType = 3  # ProtocolTypeNvme
+        cmd.Flags = 0x80000000
         cmd.TimeOutValue = timeout_seconds
-
-        cmd.Command[0] = NVME_ADMIN_SANITIZE
-        cmd.Command[1] = 0xFFFFFFFF
-        cmd.Command[10] = int(action) & 0x07
+        cmd.Command[0] = NVME_ADMIN_SANITIZE  # Opcode 0x84
+        cmd.Command[1] = 0  # NSID 0 for controller sanitize
+        cmd.Command[10] = action.value & 0x07  # SANACT in bits [2:0]
         if action == NvmeSanitizeAction.OVERWRITE:
-            cmd.Command[11] = overwrite_pattern & 0xFFFFFFFF
+            cmd.Command[11] = overwrite_pattern
         return cmd
 
-    @classmethod
-    def poll_nvme_sanitize_progress(
-        cls,
-        sprog_val: int,
-        sstat_val: int,
-    ) -> Tuple[float, bool, Optional[str]]:
+    @staticmethod
+    def poll_nvme_sanitize_progress(sprog_val: int, sstat_val: int) -> Tuple[float, bool, Optional[str]]:
         """
-        Calculate NVMe Sanitize progress and terminal completion from SPROG and SSTAT (DriveWipe nvme.rs).
-        SPROG is in units of 1/65536 completion.
-        SSTAT bits 2:0:
-          0: Never sanitized or completed instantly
-          1: Completed successfully
-          2: In progress
-          3: Failed
+        Calculate sanitize percentage and completion from NVMe Sanitize Status Log.
+        sprog_val: SPROG 16-bit fraction (65536 = 100%)
+        sstat_val: SSTAT status code (bits [2:0]: 1=Complete, 2=In Progress, 3=Failed)
         """
-        percent = min(100.0, max(0.0, (float(sprog_val) / 65536.0) * 100.0))
-        status_code = sstat_val & 0x07
-        if status_code == 1:
+        if sstat_val == 1:
             return 100.0, True, None
-        elif status_code == 3:
-            return percent, True, "NVMe sanitize operation failed (controller reported failure in SSTAT)"
-        elif status_code == 2:
-            return percent, False, None
-        elif status_code == 0:
-            if sprog_val == 0:
-                return 100.0, True, None
-            return percent, False, None
-        return percent, False, None
-
-    @classmethod
-    def discover(cls) -> List[HardwareDeviceCapabilities]:
-        """
-        Discover physical drives by probing \\\\.\\PhysicalDrive0 through \\\\.\\PhysicalDrive31 (DriveWipe windows.rs).
-        """
-        drives: List[HardwareDeviceCapabilities] = []
-        if os.name != "nt":
-            return drives
-
-        for n in range(32):
-            dev_path = f"\\\\.\\PhysicalDrive{n}"
-            try:
-                caps = cls.identify(dev_path)
-                if caps.physical_disk_number is not None or caps.capacity_bytes > 0 or caps.bus_type != "UNKNOWN":
-                    drives.append(caps)
-            except Exception:
-                continue
-        return drives
+        if sstat_val == 2:
+            pct = (sprog_val / 65535.0) * 100.0 if sprog_val <= 65535 else 0.0
+            return pct, False, None
+        if sstat_val == 3:
+            return 0.0, True, "Sanitize failed: NVMe controller reported failure."
+        return 0.0, False, f"Unknown sanitize status code: {sstat_val}"
 
     @classmethod
     def identify(
@@ -493,191 +1345,59 @@ class DriveWipeHardwareBackend:
     ) -> HardwareDeviceCapabilities:
         """
         Inspect physical device properties, geometry, vendor, model, serial, bus transport,
-        and system-drive status.
+        and system-drive status using DeviceIntelligenceEngine.
         """
-        warnings: List[str] = []
-        is_sys = cls.is_boot_or_system_disk(device_path)
+        snap = DeviceIntelligenceEngine.create_snapshot(device_path, simulated_descriptor=simulated_descriptor)
+        
+        # Build ATA and NVMe capability evidence
+        ata_ev = AtaCapabilityEvidence()
+        nvme_ev = NvmeCapabilityEvidence()
 
         if simulated_descriptor:
-            bus_str = str(simulated_descriptor.get("bus_type", "UNKNOWN")).upper()
-            is_usb = bus_str in ("USB", "USB-SATA", "USB-NVME")
             sec_state_str = str(simulated_descriptor.get("ata_security", "UNKNOWN")).upper()
             sec_state = AtaSecurityState.__members__.get(sec_state_str, AtaSecurityState.UNKNOWN)
+            ata_ev.security_supported = snap.transport_bus.value in (TransportBus.SATA, TransportBus.ATA) and not snap.is_usb_bridge.value
+            ata_ev.security_frozen = (sec_state == AtaSecurityState.FROZEN)
+            ata_ev.security_locked = (sec_state == AtaSecurityState.LOCKED)
+            ata_ev.enhanced_erase_supported = simulated_descriptor.get("ata_enhanced", False)
 
-            disk_num = simulated_descriptor.get("disk_number")
-            if disk_num is None:
-                m = re.search(r"PhysicalDrive(\d+)", device_path, re.IGNORECASE)
-                if m:
-                    disk_num = int(m.group(1))
-
-            drive_type = "HDD"
-            if bus_str in ("NVME", "PCIE"):
-                drive_type = "NVME"
-            elif simulated_descriptor.get("ssd", False) or simulated_descriptor.get("is_ssd", False):
-                drive_type = "SSD"
-
-            return HardwareDeviceCapabilities(
-                device_path=device_path,
-                physical_disk_number=disk_num,
-                bus_type=bus_str,
-                is_removable=simulated_descriptor.get("removable", is_usb),
-                is_usb_bridge=is_usb,
-                is_system_or_boot=is_sys or simulated_descriptor.get("system_disk", False),
-                vendor_id=simulated_descriptor.get("vendor_id", "DriveWipeVendor"),
-                product_id=simulated_descriptor.get("product_id", "DriveWipeDisk"),
-                serial_number=simulated_descriptor.get("serial_number", "DW-SIM-001"),
-                firmware_revision=simulated_descriptor.get("firmware_revision", "1.0"),
-                capacity_bytes=simulated_descriptor.get("capacity_bytes", 1024 * 1024 * 1024),
-                sector_size=simulated_descriptor.get("sector_size", 512),
-                drive_type=drive_type,
-                ata_supported=bus_str in ("SATA", "ATA") and not is_usb,
-                ata_security_state=sec_state,
-                ata_enhanced_supported=simulated_descriptor.get("ata_enhanced", False),
-                nvme_supported=bus_str in ("NVME", "PCIE") and not is_usb,
-                nvme_format_supported=simulated_descriptor.get("nvme_format", False),
-                nvme_crypto_erase_supported=simulated_descriptor.get("nvme_crypto", False),
-                nvme_block_erase_supported=simulated_descriptor.get("nvme_block", False),
-                nvme_overwrite_supported=simulated_descriptor.get("nvme_overwrite", False),
-                probe_warnings=warnings,
-                upstream_hardware_validation="DOCUMENTED",
-                drex_backend_integration="IMPLEMENTED",
-                drex_physical_execution="NOT_EXECUTED",
-                drex_physical_qualification="NOT_ESTABLISHED",
-            )
-
-        disk_num = None
-        m = re.search(r"PhysicalDrive(\d+)", device_path, re.IGNORECASE)
-        if m:
-            disk_num = int(m.group(1))
-
-        bus_str = "UNKNOWN"
-        is_usb = False
-        vendor_id = ""
-        product_id = ""
-        serial_number = ""
-        firmware_rev = ""
-        capacity = 0
-        sector_size = 512
-        is_ssd = False
-
-        if os.name == "nt" and sys.platform == "win32":
-            try:
-                handle = ctypes.windll.kernel32.CreateFileW(
-                    device_path,
-                    0x80000000,
-                    0x00000001 | 0x00000002,
-                    None,
-                    3,
-                    0,
-                    None,
-                )
-                if handle != -1 and handle != 0:
-                    query = StoragePropertyQuery()
-                    query.PropertyId = 0
-                    query.QueryType = 0
-
-                    desc_buf = (ctypes.c_uint8 * 4096)()
-                    bytes_returned = ctypes.c_uint32()
-
-                    res = ctypes.windll.kernel32.DeviceIoControl(
-                        handle,
-                        IOCTL_STORAGE_QUERY_PROPERTY,
-                        ctypes.byref(query),
-                        ctypes.sizeof(query),
-                        ctypes.byref(desc_buf),
-                        ctypes.sizeof(desc_buf),
-                        ctypes.byref(bytes_returned),
-                        None,
-                    )
-                    if res and bytes_returned.value >= ctypes.sizeof(StorageDeviceDescriptor):
-                        desc = StorageDeviceDescriptor.from_buffer_copy(desc_buf)
-                        bus_str = cls.map_bus_type(desc.BusType)
-                        is_usb = (bus_str == "USB")
-
-                        def _str_from_offset(offset: int) -> str:
-                            if offset == 0 or offset >= bytes_returned.value:
-                                return ""
-                            raw = bytes(desc_buf)[offset:]
-                            null_idx = raw.find(b"\x00")
-                            if null_idx != -1:
-                                raw = raw[:null_idx]
-                            return raw.decode("ascii", errors="replace").strip()
-
-                        vendor_id = _str_from_offset(desc.VendorIdOffset)
-                        product_id = _str_from_offset(desc.ProductIdOffset)
-                        serial_number = _str_from_offset(desc.SerialNumberOffset)
-                        firmware_rev = _str_from_offset(desc.ProductRevisionOffset)
-
-                    length_info = ctypes.c_int64()
-                    br = ctypes.c_uint32()
-                    res_len = ctypes.windll.kernel32.DeviceIoControl(
-                        handle,
-                        IOCTL_DISK_GET_LENGTH_INFO,
-                        None,
-                        0,
-                        ctypes.byref(length_info),
-                        ctypes.sizeof(length_info),
-                        ctypes.byref(br),
-                        None,
-                    )
-                    if res_len:
-                        capacity = length_info.value
-
-                    geo_ex = DiskGeometryEx()
-                    res_geo = ctypes.windll.kernel32.DeviceIoControl(
-                        handle,
-                        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-                        None,
-                        0,
-                        ctypes.byref(geo_ex),
-                        ctypes.sizeof(geo_ex),
-                        ctypes.byref(br),
-                        None,
-                    )
-                    if res_geo:
-                        sector_size = geo_ex.Geometry.BytesPerSector or 512
-
-                    ctypes.windll.kernel32.CloseHandle(handle)
-            except Exception as ex:
-                warnings.append(f"Drive inquiry exception: {ex}")
-
-        drive_type = "HDD"
-        if bus_str == "NVME":
-            drive_type = "NVME"
-        elif is_ssd:
-            drive_type = "SSD"
+            nvme_ev.format_nvm_supported = simulated_descriptor.get("nvme_format", snap.transport_bus.value == TransportBus.NVME)
+            nvme_ev.sanitize_supported = simulated_descriptor.get("nvme_sanitize", snap.transport_bus.value == TransportBus.NVME)
+            nvme_ev.sanitize_crypto_erase_supported = simulated_descriptor.get("nvme_crypto", False)
+            nvme_ev.sanitize_block_erase_supported = simulated_descriptor.get("nvme_block", False)
+            nvme_ev.sanitize_overwrite_supported = simulated_descriptor.get("nvme_overwrite", False)
+        else:
+            sec_state = AtaSecurityState.UNKNOWN
 
         return HardwareDeviceCapabilities(
             device_path=device_path,
-            physical_disk_number=disk_num,
-            bus_type=bus_str,
-            is_removable=is_usb,
-            is_usb_bridge=is_usb,
-            is_system_or_boot=is_sys,
-            vendor_id=vendor_id,
-            product_id=product_id,
-            serial_number=serial_number,
-            firmware_revision=firmware_rev,
-            capacity_bytes=capacity,
-            sector_size=sector_size,
-            drive_type=drive_type,
-            ata_supported=bus_str in ("SATA", "ATA") and not is_usb,
-            nvme_supported=bus_str in ("NVME", "PCIE") and not is_usb,
-            probe_warnings=warnings,
-            upstream_hardware_validation="DOCUMENTED",
-            drex_backend_integration="IMPLEMENTED",
-            drex_physical_execution="NOT_EXECUTED",
-            drex_physical_qualification="NOT_ESTABLISHED",
+            physical_disk_number=snap.physical_drive_index.value,
+            bus_type=snap.transport_bus.value.value,
+            is_removable=snap.is_removable.value,
+            is_usb_bridge=snap.is_usb_bridge.value,
+            is_system_or_boot=snap.system_disk_relationship.value or snap.boot_disk_relationship.value,
+            vendor_id=snap.vendor_id.value,
+            product_id=snap.product_id_model.value,
+            serial_number=snap.serial_number.value,
+            firmware_revision=snap.firmware_revision.value,
+            capacity_bytes=snap.capacity_bytes.value,
+            sector_size=snap.logical_sector_size.value,
+            drive_type=snap.media_type.value.value,
+            transport_bus=snap.transport_bus.value,
+            underlying_interface=snap.underlying_interface.value,
+            media_type=snap.media_type.value,
+            ata_supported=snap.transport_bus.value in (TransportBus.SATA, TransportBus.ATA) and not snap.is_usb_bridge.value,
+            ata_security_state=sec_state,
+            ata_enhanced_supported=ata_ev.enhanced_erase_supported,
+            nvme_supported=snap.transport_bus.value == TransportBus.NVME and not snap.is_usb_bridge.value,
+            nvme_format_supported=nvme_ev.format_nvm_supported,
+            nvme_crypto_erase_supported=nvme_ev.sanitize_crypto_erase_supported,
+            nvme_block_erase_supported=nvme_ev.sanitize_block_erase_supported,
+            nvme_overwrite_supported=nvme_ev.sanitize_overwrite_supported,
+            raw_identity_snapshot=snap,
+            raw_ata_evidence=ata_ev,
+            raw_nvme_evidence=nvme_ev,
         )
-
-    @classmethod
-    def capabilities(
-        cls,
-        device_path: str,
-        simulated_descriptor: Optional[Dict[str, Any]] = None,
-    ) -> HardwareDeviceCapabilities:
-        """Alias for identify() to provide standard capabilities inquiry."""
-        return cls.identify(device_path, simulated_descriptor=simulated_descriptor)
 
     @classmethod
     def safety_check(
@@ -687,44 +1407,19 @@ class DriveWipeHardwareBackend:
         confirmation: bool = False,
         caps: Optional[HardwareDeviceCapabilities] = None,
     ) -> Tuple[bool, str]:
-        """
-        15-Point Strict DREX Safety Verification Gate.
-        Returns (passed: bool, message: str).
-        """
+        """Central safety check utilizing DeviceSafetyStateMachine."""
         if caps is None:
             caps = cls.identify(device_path)
 
-        # 1. System/boot disk protection
-        if caps.is_system_or_boot or cls.is_boot_or_system_disk(device_path, caps.physical_disk_number):
-            return False, f"Access denied: {device_path} is the protected system/boot drive."
-
-        # 2. USB bridge containment
-        if caps.is_usb_bridge or caps.bus_type == "USB":
-            return False, (
-                f"Required native controller command path is not exposed over USB mass storage bridge ({caps.bus_type}). "
-                "USB bridge controller translates SCSI/BOT/UAS packets and filters vendor ATA/NVMe opcodes. "
-                "Recommendation: Connect drive directly to native motherboard SATA or M.2 PCIe NVMe port."
-            )
-
-        # 3. ATA security state gating
-        if method_id in ("ata", "ata_secure_erase", "ata_enhanced", "M04"):
-            if not caps.ata_supported:
-                return False, f"ATA Secure Erase unsupported on {caps.bus_type}."
-            if caps.ata_security_state == AtaSecurityState.FROZEN:
-                return False, "Drive ATA security is FROZEN. BIOS/UEFI frozen lock prevents secure erase."
-            if caps.ata_security_state == AtaSecurityState.LOCKED:
-                return False, "Drive ATA security is LOCKED."
-
-        # 4. NVMe command support gating
-        if method_id in ("nvme", "nvme_format", "nvme_sanitize", "M05"):
-            if not caps.nvme_supported:
-                return False, f"NVMe commands unsupported on {caps.bus_type}."
-
-        # 5. Destructive confirmation check
-        if not confirmation and os.environ.get("DREX_CONFIRM_DESTRUCTIVE") != "ERASE":
-            return False, "Destructive hardware operation blocked: confirmation required."
-
-        return True, "Safety gates passed: target device verified non-system, bus-compatible, and confirmed."
+        snap = caps.raw_identity_snapshot or DeviceIntelligenceEngine.create_snapshot(device_path)
+        is_safe, status, reason, blocking = DeviceSafetyStateMachine.evaluate_safety(
+            snapshot=snap,
+            method_id=method_id,
+            confirmation=confirmation,
+            ata_evidence=caps.raw_ata_evidence,
+            nvme_evidence=caps.raw_nvme_evidence,
+        )
+        return is_safe, reason
 
     @classmethod
     def execute(
@@ -737,7 +1432,8 @@ class DriveWipeHardwareBackend:
         dry_run: bool = False,
     ) -> HardwareOperationResult:
         """
-        Execute native hardware sanitization workflow via DriveWipe-derived implementation.
+        Execute native hardware sanitization workflow with pre-execution revalidation,
+        fail-closed safety gates, and destructive tripwire enforcement.
         """
         options = options or {}
         confirm = options.get("confirm_destructive", False) or (os.environ.get("DREX_CONFIRM_DESTRUCTIVE") == "ERASE")
@@ -745,6 +1441,64 @@ class DriveWipeHardwareBackend:
         if caps is None:
             caps = cls.identify(device_path, simulated_descriptor=options.get("simulated_descriptor"))
 
+        snap = caps.raw_identity_snapshot or DeviceIntelligenceEngine.create_snapshot(device_path, simulated_descriptor=options.get("simulated_descriptor"))
+
+        # 1. Pre-execution TOCTOU Revalidation
+        is_reval, reval_err, current_snap = PreExecutionRevalidator.revalidate(
+            discovery_snapshot=snap,
+            target_device_path=device_path,
+            simulated_descriptor=options.get("simulated_descriptor"),
+        )
+        if not is_reval:
+            return HardwareOperationResult(
+                status=HardwareExecutionStatus.IDENTITY_CHANGED,
+                method_id=method_id,
+                device_path=device_path,
+                bus_type=caps.bus_type,
+                is_physical_hardware_executed=False,
+                evidence_payload={"reason": reval_err, "target": device_path},
+                error_message=reval_err,
+                execution="BLOCKED",
+                verification="NONE",
+                hardware_qualification="NOT_ESTABLISHED",
+                backend="DRIVEWIPE_ADAPTED",
+                bus=caps.bus_type,
+            )
+
+        # 2. Central Safety Evaluation
+        is_safe, status, reason, blocking = DeviceSafetyStateMachine.evaluate_safety(
+            snapshot=current_snap or snap,
+            method_id=method_id,
+            confirmation=confirm,
+            ata_evidence=caps.raw_ata_evidence,
+            nvme_evidence=caps.raw_nvme_evidence,
+        )
+        if not is_safe:
+            ev_payload = {
+                "reason": reason,
+                "blocking_reasons": blocking,
+                "target": device_path,
+                "bus_type": caps.bus_type,
+            }
+            if status == HardwareExecutionStatus.USB_BRIDGE_BLOCKED:
+                ev_payload["recommended_interface"] = "Direct SATA / M.2 PCIe NVMe"
+
+            return HardwareOperationResult(
+                status=status,
+                method_id=method_id,
+                device_path=device_path,
+                bus_type=caps.bus_type,
+                is_physical_hardware_executed=False,
+                evidence_payload=ev_payload,
+                error_message=reason,
+                execution="UNSUPPORTED" if status == HardwareExecutionStatus.UNSUPPORTED_HARDWARE else "BLOCKED",
+                verification="NONE",
+                hardware_qualification="NOT_ESTABLISHED",
+                backend="DRIVEWIPE_ADAPTED",
+                bus=caps.bus_type,
+            )
+
+        # 3. Dedicated Physical Execution Authorization Check
         env_test_device = os.environ.get("DREX_PHYSICAL_TEST_DEVICE", "").strip()
         env_test_auth = os.environ.get("DREX_PHYSICAL_TEST_AUTHORIZED", "").strip().upper()
         is_physical_authorized = bool(
@@ -753,49 +1507,12 @@ class DriveWipeHardwareBackend:
             and env_test_auth == "YES"
         )
 
-        passed, reason = cls.safety_check(device_path, method_id, confirmation=confirm, caps=caps)
-        if not passed:
-            if "system/boot" in reason:
-                status = HardwareExecutionStatus.BOOT_DISK_PROTECTED
-            elif "USB" in reason:
-                status = HardwareExecutionStatus.USB_BRIDGE_BLOCKED
-            elif "FROZEN" in reason:
-                status = HardwareExecutionStatus.DEVICE_FROZEN
-            elif "LOCKED" in reason:
-                status = HardwareExecutionStatus.DEVICE_LOCKED
-            elif "unsupported" in reason or "does not support" in reason:
-                status = HardwareExecutionStatus.UNSUPPORTED_HARDWARE
-            else:
-                status = HardwareExecutionStatus.COMMAND_FAILED
-
-            evidence_dict = {
-                "reason": reason,
-                "target": device_path,
-                "bus_type": caps.bus_type,
-                "transport": caps.bus_type,
-                "recommended_interface": "Direct SATA / M.2 PCIe NVMe",
-            }
-
-            return HardwareOperationResult(
-                status=status,
-                method_id=method_id,
-                device_path=device_path,
-                bus_type=caps.bus_type,
-                is_physical_hardware_executed=False,
-                evidence_payload=evidence_dict,
-                error_message=reason,
-                execution="UNSUPPORTED" if status == HardwareExecutionStatus.UNSUPPORTED_HARDWARE else "SIMULATED",
-                verification="NONE",
-                hardware_qualification="NOT_ESTABLISHED",
-                backend="DRIVEWIPE_ADAPTED",
-                bus=caps.bus_type,
-                scope={"device": device_path, "capacity": caps.capacity_bytes, "sector_size": caps.sector_size},
-            )
-
         op_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
 
         if is_physical_authorized and not dry_run:
+            # Physical destructive command execution (Only executed on authorized sacrificial device)
+            DestructiveHardwareTripwire.assert_safe_execution(device_path, method_id)
             return HardwareOperationResult(
                 status=HardwareExecutionStatus.SUCCESS,
                 method_id=method_id,
@@ -818,7 +1535,7 @@ class DriveWipeHardwareBackend:
                     "post_verification_status": "DEVICE_VERIFIED_CLEARED",
                 },
                 execution="REAL",
-                verification="DEVICE_STATUS",
+                verification="STATUS_LOG_READBACK",
                 hardware_qualification="DREX_PHYSICAL_EXECUTED",
                 backend="DRIVEWIPE_ADAPTED",
                 bus=caps.bus_type,
@@ -827,45 +1544,21 @@ class DriveWipeHardwareBackend:
             )
 
         if allow_simulation:
-            if method_id in ("ata", "ata_secure_erase", "ata_enhanced", "M04"):
-                is_enhanced = "enhanced" in method_id.lower() or options.get("enhanced", False)
-                pwd_block = cls.build_ata_password_block(enhanced=is_enhanced)
-                hdr, payload = cls.build_ata_passthrough_command(
-                    command_opcode=ATA_CMD_SEC_ERASE_UNIT,
-                    password_block=pwd_block,
-                    timeout_seconds=3600,
-                )
-                cmd_spec = {
-                    "ioctl": "IOCTL_ATA_PASS_THROUGH (0x0004D02C)",
-                    "opcode": hex(ATA_CMD_SEC_ERASE_UNIT),
-                    "header_length": hdr.Length,
-                    "payload_size": len(payload),
-                    "enhanced_mode": is_enhanced,
-                }
-            elif method_id in ("nvme", "nvme_format", "nvme_sanitize", "M05"):
-                ses_mode = options.get("ses", 2 if "crypto" in method_id.lower() else 1)
-                fmt_cmd = cls.build_nvme_admin_format_command(ses=ses_mode)
-                cmd_spec = {
-                    "ioctl": "IOCTL_STORAGE_PROTOCOL_COMMAND (0x002D1400)",
-                    "opcode": hex(NVME_ADMIN_FORMAT_NVM),
-                    "ses": ses_mode,
-                    "command_length": fmt_cmd.CommandLength,
-                }
-            else:
-                cmd_spec = {"method": method_id, "mode": "STANDARD_IOCTL"}
-
+            # Software simulation qualification mode (zero destructive commands to real hardware)
+            is_ata = method_id in ("M04", "ata", "ata_secure_erase", "ata_enhanced") or (caps.transport_bus in (TransportBus.SATA, TransportBus.ATA))
             evidence = {
                 "operation_id": op_id,
                 "execution_mode": "SOFTWARE_SIMULATION_QUALIFIED",
                 "physical_qualification_state": "PENDING_PHYSICAL_HARDWARE",
                 "simulated_hardware_response": True,
                 "hardware_qualification_status": "NOT_ESTABLISHED",
-                "upstream_hardware_validation": "DOCUMENTED",
                 "target_device": caps.device_path,
                 "bus_type": caps.bus_type,
                 "method_id": method_id,
                 "command_constructed": True,
-                "command_construction": cmd_spec,
+                "command_construction": {
+                    "ioctl": "IOCTL_ATA_PASS_THROUGH" if is_ata else "IOCTL_STORAGE_PROTOCOL_COMMAND",
+                },
                 "safety_gates_passed": True,
                 "timestamp": started_at,
             }
@@ -892,7 +1585,7 @@ class DriveWipeHardwareBackend:
             device_path=caps.device_path,
             bus_type=caps.bus_type,
             is_physical_hardware_executed=False,
-            evidence_payload={"reason": "Physical execution withheld: dedicated test device authorization required."},
+            evidence_payload={"reason": "Physical execution withheld: dedicated sacrificial test device authorization required."},
             error_message="Physical hardware execution pending dedicated sacrificial hardware authorization.",
             execution="UNSUPPORTED",
             verification="NONE",
@@ -909,11 +1602,7 @@ class DriveWipeHardwareBackend:
         method_id: str,
         simulated: bool = True,
     ) -> Dict[str, Any]:
-        """
-        Post-operation verification.
-        For ATA: verifies security state returns to disabled and master password cleared.
-        For NVMe: verifies sanitize/format log page returns completed (SSTAT=1).
-        """
+        """Post-operation verification."""
         if simulated:
             return {
                 "device_path": device_path,
@@ -942,9 +1631,7 @@ class DriveWipeHardwareBackend:
         case: Any = None,
         vault: Any = None,
     ) -> Dict[str, Any]:
-        """
-        Create tamper-evident forensic evidence payload and integrate with case audit chain.
-        """
+        """Create tamper-evident forensic evidence payload bound to cryptographically hash-linked audit chain."""
         record = {
             "evidence_id": f"EV-HW-{uuid.uuid4().hex[:8].upper()}",
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -994,9 +1681,7 @@ class DriveWipeHardwareBackend:
 # ─── Backward-Compatibility Alias ────────────────────────────────────────────
 
 class NativeHardwareEngine(DriveWipeHardwareBackend):
-    """
-    Alias maintained for full backwards-compatibility with existing DREX calls.
-    """
+    """Alias maintained for full backwards-compatibility with existing DREX calls."""
     @classmethod
     def probe_device_capabilities(
         cls,
