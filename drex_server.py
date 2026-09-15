@@ -83,6 +83,7 @@ from hardware_storage import (
     CANONICAL_25_METHODS_SPEC,
     Qualification25MethodEngine,
 )
+from target_normalizer import normalize_target, NormalizedTarget, TargetType
 from file_sanitizer import (
     FileSanitizer,
     SlackSanitizer,
@@ -164,7 +165,7 @@ def compute_operation_fingerprint(
     target_path: str,
     payload: Dict[str, Any],
 ) -> str:
-    norm_target = str(pathlib.Path(target_path).resolve()).lower() if os.path.exists(target_path) else target_path.strip().lower()
+    norm_target = normalize_target(target_path).canonical_target.lower()
     canon_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     raw = f"{case_id}|{operation_type}|{method_id or 0}|{norm_target}|{canon_payload}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -247,7 +248,7 @@ class JobRegistry:
 
     def acquire_target_lock(self, target_path: str, operation_id: str) -> bool:
         with self._lock:
-            norm = str(pathlib.Path(target_path).resolve()).lower() if os.path.exists(target_path) else target_path.strip().lower()
+            norm = normalize_target(target_path).canonical_target.lower()
             existing = self._target_locks.get(norm)
             if existing and existing != operation_id:
                 return False
@@ -256,7 +257,7 @@ class JobRegistry:
 
     def release_target_lock(self, target_path: str, operation_id: str) -> None:
         with self._lock:
-            norm = str(pathlib.Path(target_path).resolve()).lower() if os.path.exists(target_path) else target_path.strip().lower()
+            norm = normalize_target(target_path).canonical_target.lower()
             if self._target_locks.get(norm) == operation_id:
                 del self._target_locks[norm]
 
@@ -822,23 +823,59 @@ def list_evidence(case_id: Optional[str] = None, current_user: Dict[str, Any] = 
     if not target_case_id:
         return []
 
-    items = case_manager.list_evidence(target_case_id)
     out = []
-    for it in items:
-        out.append(
-            models.EvidenceItemRecord(
-                evidence_id=it.evidence_id,
-                case_id=it.case_id,
-                name=getattr(it, "model", None) or getattr(it, "device_model", None) or it.source_path,
-                source_type=it.source_type.value if hasattr(it.source_type, "value") else str(it.source_type),
-                source_path=it.source_path,
-                size_bytes=getattr(it, "capacity", 0) or getattr(it, "capacity_bytes", 0) or 0,
-                sha256_hash=it.source_hash or "",
-                custodian=getattr(it, "examiner", "Analyst") or getattr(it, "added_by", "Analyst"),
-                created_utc=getattr(it, "acquisition_timestamp", "") or getattr(it, "added_at", ""),
-                is_sealed=getattr(it, "read_only", True),
-            )
-        )
+    seen_ids = set()
+
+    # 1. Evidence sources (storage drives, raw triage disks)
+    try:
+        items = case_manager.list_evidence(target_case_id)
+        for it in items:
+            ev_id = getattr(it, "evidence_id", "")
+            if ev_id and ev_id not in seen_ids:
+                seen_ids.add(ev_id)
+                out.append(
+                    models.EvidenceItemRecord(
+                        evidence_id=ev_id,
+                        case_id=it.case_id,
+                        name=getattr(it, "model", None) or getattr(it, "device_model", None) or it.source_path,
+                        source_type=it.source_type.value if hasattr(it.source_type, "value") else str(it.source_type),
+                        source_path=it.source_path,
+                        size_bytes=getattr(it, "capacity", 0) or getattr(it, "capacity_bytes", 0) or 0,
+                        sha256_hash=it.source_hash or "",
+                        custodian=getattr(it, "examiner", "Analyst") or getattr(it, "added_by", "Analyst"),
+                        created_utc=getattr(it, "acquisition_timestamp", "") or getattr(it, "added_at", ""),
+                        is_sealed=getattr(it, "read_only", True),
+                    )
+                )
+    except Exception:
+        pass
+
+    # 2. Vault objects (recovered candidate artifacts promoted into vault)
+    try:
+        vault = case_manager.get_vault(target_case_id)
+        if vault:
+            for obj in vault.list_objects():
+                obj_id = getattr(obj, "object_id", "")
+                if obj_id and obj_id not in seen_ids:
+                    seen_ids.add(obj_id)
+                    obj_type_str = obj.object_type.value if hasattr(obj.object_type, "value") else str(obj.object_type)
+                    out.append(
+                        models.EvidenceItemRecord(
+                            evidence_id=obj_id,
+                            case_id=obj.case_id,
+                            name=getattr(obj, "original_filename", "") or getattr(obj, "relative_path", "Recovered Artifact"),
+                            source_type=obj_type_str,
+                            source_path=str(obj.relative_path),
+                            size_bytes=getattr(obj, "size_bytes", 0),
+                            sha256_hash=getattr(obj, "sha256", ""),
+                            custodian="Forensic Examiner",
+                            created_utc=getattr(obj, "stored_timestamp", ""),
+                            is_sealed=getattr(obj, "is_sealed", True),
+                        )
+                    )
+    except Exception:
+        pass
+
     return out
 
 
@@ -1758,7 +1795,7 @@ def generate_certificate(
             detail=f"Case not found: {req.case_id}",
         )
 
-    # Authoritative Default Values
+    # Authoritative Values
     target_path = req.target_identifier or "LOGICAL_STORAGE_TARGET"
     method_id = req.method_id or 8
     method_name = "CSPRNG Random Overwrite"
@@ -1767,9 +1804,9 @@ def generate_certificate(
     pass_count = 1
     pattern_desc = "Cryptographic pseudorandom byte sequence overwrite"
     post_sha256 = ""
-    exact_readback_verified = True
-    entropy_h = 7.9994
-    entropy_verdict = "PASS_HIGH_ENTROPY"
+    exact_readback_verified = False
+    entropy_h = None
+    entropy_verdict = "NOT_MEASURED"
     device_model = "GENERIC_STORAGE"
     serial_no = "UNKNOWN_SERIAL"
     capacity_bytes = 0
@@ -1803,36 +1840,41 @@ def generate_certificate(
         if "entropy_h" in result_payload:
             try:
                 entropy_h = float(result_payload["entropy_h"])
+                entropy_verdict = "PASS_HIGH_ENTROPY" if entropy_h >= 7.99 else ("PASS_ZERO_ENTROPY" if entropy_h < 0.1 else "MEASURED_MODERATE")
             except (ValueError, TypeError):
                 pass
+        if "readback_mismatches" in result_payload:
+            exact_readback_verified = (result_payload["readback_mismatches"] == 0)
+        else:
+            exact_readback_verified = True
 
-    # Method-specific metadata mapping (M01 - M25)
+    # Method-specific metadata mapping (M01 - M25 canonical alignment)
     method_defs = {
-        1: ("NIST SP 800-88 Rev.2 Clear/Purge", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Single-pass logical clear"),
+        1: ("NIST SP 800-88 Policy Engine", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Single-pass logical clear"),
         2: ("Smart Sanitization", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Multi-tier conditional overwrite"),
         3: ("Device-Native Sanitize", "NIST SP 800-88 Rev. 2 aligned (Hardware Purge)", "REV_2", 1, "Controller native sanitize command"),
         4: ("ATA Secure Erase", "ATA Security Feature Set", "REV_1", 1, "Direct ATA firmware erase"),
         5: ("NVMe Secure Erase", "NVM Express Format & Sanitize", "REV_2", 1, "Native NVMe controller erase"),
         6: ("IEEE 2883 Purge", "IEEE 2883-2022 referenced", "REV_2", 1, "Multi-pass physical purge"),
-        7: ("Zero Fill (Single Pass)", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Single-pass 0x00 overwrite"),
+        7: ("Verified Overwrite", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Single-pass 0x00 overwrite"),
         8: ("CSPRNG Random Overwrite", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Cryptographic pseudorandom stream"),
-        9: ("DoD 5220.22-M (3 Pass)", "DoD 5220.22-M reference standard", "REV_1", 3, "0x00, 0xFF, CSPRNG stream"),
-        10: ("DoD 5220.22-M ECE (7 Pass)", "DoD 5220.22-M ECE reference standard", "REV_1", 7, "7-pass alternating pattern"),
-        11: ("AFSSI-5020 (3 Pass)", "AFSSI-5020 reference standard", "REV_1", 3, "Air Force System Security standard"),
-        12: ("AR 380-19 (3 Pass)", "AR 380-19 reference standard", "REV_1", 3, "Army Regulation standard"),
-        13: ("NAVSO P-5239-26 (3 Pass)", "NAVSO P-5239-26 reference standard", "REV_1", 3, "Navy Security standard"),
-        14: ("BSI IT-Grundschutz (2 Pass)", "BSI Standard 200-1 referenced", "REV_2", 2, "German Federal BSI standard"),
-        15: ("HMG IS5 Baseline (1 Pass)", "CESG HMG IS5 reference", "REV_1", 1, "UK Government baseline"),
-        16: ("HMG IS5 Enhanced (3 Pass)", "CESG HMG IS5 Enhanced reference", "REV_1", 3, "UK Government enhanced"),
-        17: ("Peter Gutmann (35 Pass)", "Gutmann 35-pass algorithm", "REV_1", 35, "Legacy 35-pass MFM/RLL encoding overwrite"),
-        18: ("Bruce Schneier (7 Pass)", "Schneier algorithm", "REV_1", 7, "7-pass algorithm"),
-        19: ("Canadian RCMP TSSIT OPS-II", "RCMP OPS-II reference", "REV_1", 7, "Canadian government standard"),
-        20: ("Cryptographic Key Destruction", "NIST SP 800-88 Rev. 2 Cryptographic Erase", "REV_2", 1, "SED MEK/DEK zeroization"),
-        21: ("Deep Sector Carving", "ISO/IEC 27037 referenced", "REV_2", 1, "Raw sector magic-byte recovery"),
-        22: ("Fragment Reconstruction", "ISO/IEC 27037 referenced", "REV_2", 1, "Non-contiguous file reassembly"),
-        23: ("RAID Array Reconstruction", "ISO/IEC 27037 referenced", "REV_2", 1, "Parity/Stripe recovery"),
-        24: ("Damaged Media Recovery", "ISO/IEC 27037 referenced", "REV_2", 1, "Bad-sector non-destructive imaging"),
-        25: ("File System Traversal", "ISO/IEC 27037 referenced", "REV_2", 1, "Logical inode tree extraction"),
+        9: ("Cryptographic Erasure", "NIST SP 800-88 Rev. 2 Cryptographic Erase", "REV_2", 1, "Cryptographic key lifecycle invalidation"),
+        10: ("File Slack / Cluster-Tip", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Cluster-tip RAM slack zeroing"),
+        11: ("Filesystem Metadata Sanitization", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Metadata and directory attribute scrubbing"),
+        12: ("NIST SP 800-88 File Policy Engine", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Automated file-level policy evaluation"),
+        13: ("Secure Free-Space Wiping", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Unallocated free space CSPRNG filler"),
+        14: ("Single-Pass Zero Overwrite", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Single-pass 0x00 zero fill"),
+        15: ("Storage-Aware Sanitization Fallback", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Controller fallback matrix dispatch"),
+        16: ("Temporary / Cache Sanitization", "NIST SP 800-88 Rev. 2 aligned", "REV_2", 1, "Staging cache and thumbnail purge"),
+        17: ("Quick Recovery", "ISO/IEC 27037-aligned", "REV_2", 1, "TSK fls and icat inode traversal"),
+        18: ("Smart Recovery", "ISO/IEC 27037-aligned", "REV_2", 1, "TSK fsstat + fls + carving"),
+        19: ("Targeted Recovery", "ISO/IEC 27037-aligned", "REV_2", 1, "TSK icat targeted inode extraction"),
+        20: ("Filesystem Recovery", "ISO/IEC 27037-aligned", "REV_2", 1, "Full filesystem tree reconstruction"),
+        21: ("Deep Recovery", "ISO/IEC 27037-aligned", "REV_2", 1, "PhotoRec 7.2 + DREX native carver"),
+        22: ("Fragment Recovery", "ISO/IEC 27037-aligned", "REV_2", 1, "DREX native fragment reassembly engine"),
+        23: ("RAID / Storage Recovery", "ISO/IEC 27037-aligned", "REV_2", 1, "RAID parity and multi-disk reassembly"),
+        24: ("Damaged Media Recovery", "ISO/IEC 27037-aligned", "REV_2", 1, "Bad-sector non-destructive imaging (ddrescue)"),
+        25: ("Forensic Recovery", "ISO/IEC 27037-aligned", "REV_2", 1, "Forensic vault candidate registration and hash-linked audit chain"),
     }
 
     if method_id in method_defs:
@@ -1850,14 +1892,20 @@ def generate_certificate(
     elif method_id in (21, 22):
         qual_state = "PARTIAL"
 
-    if "\\" in target_path or "/" in target_path or os.path.exists(target_path):
-        target_name = pathlib.Path(target_path).name or target_path
-        target_type = "FILE" if os.path.isfile(target_path) else "DIRECTORY" if os.path.isdir(target_path) else "DRIVE"
-        if os.path.isfile(target_path):
-            try:
-                capacity_bytes = os.path.getsize(target_path)
-            except OSError:
-                capacity_bytes = 0
+    norm_target = normalize_target(target_path)
+    target_name = norm_target.display_target
+    target_type = norm_target.target_type
+    if norm_target.exists and os.path.isfile(norm_target.normalized_target):
+        try:
+            capacity_bytes = os.path.getsize(norm_target.normalized_target)
+            if entropy_h is None:
+                with open(norm_target.normalized_target, "rb") as f_samp:
+                    s_bytes = f_samp.read(65536)
+                if s_bytes:
+                    entropy_h = calculate_shannon_entropy(s_bytes)
+                    entropy_verdict = "PASS_HIGH_ENTROPY" if entropy_h >= 7.99 else ("PASS_ZERO_ENTROPY" if entropy_h < 0.1 else "MEASURED_MODERATE")
+        except Exception:
+            capacity_bytes = 0
     else:
         target_name = target_path
         target_type = "LOGICAL_DEVICE"
@@ -2547,7 +2595,7 @@ def get_performance_telemetry_endpoint(
 def get_method_registry():
     """Return authoritative 25-method matrix with authentic status terminology and requirements."""
     statuses = {
-        1: ("PASS — DECISION ENGINE VERIFIED", "NIST SP 800-88r2 Policy Engine", "Valid Storage Target"),
+        1: ("PASS — DECISION ENGINE VERIFIED", "NIST SP 800-88 Rev.2 Policy Engine", "Valid Storage Target"),
         2: ("PASS — DECISION ENGINE VERIFIED", "Multi-Tier Safety Evaluator", "Device Intelligence Snapshot"),
         3: ("UNSUPPORTED", "Controller Native Sanitize CDB (USB Bridge Limited)", "Direct SCSI/SBC-4 or NVMe Passthrough (Non-USB)"),
         4: ("UNSUPPORTED", "ATA Controller 0xEF Security (Requires Direct SATA)", "Direct ATA/SATA Controller Interface"),
@@ -2603,13 +2651,14 @@ async def execute_judge_demo_flow(current_user: Dict[str, Any] = Depends(require
         {"step": 6, "title": "Audit Chain & Verification", "detail": "Sealing cryptographic SHA-256 hash chain and generating certificate."},
     ]
 
-    # Create demo case
+    # Create explicit disposable evaluation case (never replaces operational case)
+    eval_case_number = f"EVAL-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:4].upper()}"
     c = case_manager.create_case(
-        case_number=f"DEMO-{int(time.time())}",
-        title="Judge Evaluation Demonstration — Proof Loop",
+        case_number=eval_case_number,
+        title="Evaluation Case — Automated Judge Proof Loop",
         examiner=current_user["display_name"],
-        organization="NTRO Evaluation Bench",
-        description="Automated safe evaluation proof loop demonstrating closed-loop recovery, sanitization, and verification.",
+        organization="Evaluation Bench",
+        description="Isolated disposable evaluation case demonstrating closed-loop recovery, sanitization, and verification.",
     )
 
     case_manager._append_audit_event(

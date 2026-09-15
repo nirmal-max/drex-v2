@@ -23,6 +23,10 @@ License: Apache 2.0 (compatible with DriveWipe MIT/permissive terms).
 from __future__ import annotations
 
 import ctypes
+try:
+    import ctypes.wintypes
+except Exception:
+    pass
 import enum
 import hashlib
 import json
@@ -927,6 +931,37 @@ class DeviceIntelligenceEngine:
 
         return False
 
+    @classmethod
+    def is_device_accessible(cls, device_path: str, disk_number: Optional[int] = None) -> bool:
+        """Check if physical device is accessible on Windows via CreateFileW query."""
+        if not sys.platform.startswith("win"):
+            return True
+        try:
+            kernel32 = ctypes.windll.kernel32
+            h = kernel32.CreateFileW(
+                device_path,
+                0,  # Query access only
+                0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+                None,
+                3,  # OPEN_EXISTING
+                0,
+                None,
+            )
+            if h != -1 and h != 0xFFFFFFFFFFFFFFFF:
+                kernel32.CloseHandle(h)
+                return True
+            err = kernel32.GetLastError()
+            # ERROR_ACCESS_DENIED (5) or ERROR_SHARING_VIOLATION (32) means device physically exists
+            if err in (5, 32):
+                return True
+            return False
+        except Exception:
+            return False
+
+
+
+# Re-export target normalization layer
+from target_normalizer import TargetType, NormalizedTarget, normalize_target
 
 
 # ─── Safety State Machine & Central Safety Gate ──────────────────────────────

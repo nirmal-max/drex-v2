@@ -54,6 +54,12 @@ const STATE = {
   currentRole: 'JUDGE_DEMO',
   token: null,
   wsConnected: false,
+  notifications: [],
+  selectedDriveMethod: 1,
+  selectedFileMethod: 8,
+  selectedRecoveryMethod: 17,
+  lastPlannedTarget: null,
+  pendingDestructiveTarget: null,
 };
 
 function getActiveCaseId() {
@@ -64,6 +70,70 @@ function getActiveCaseId() {
     return STATE.cases[0].case_id;
   }
   return null;
+}
+
+function showNotification({ severity = 'INFO', title = 'NOTIFICATION', message = '', jobId = null, caseId = null, methodId = null, target = null, workflowId = null, durationMs = 5000 }) {
+  if (!STATE.notifications) STATE.notifications = [];
+  STATE.notifications.unshift({
+    timestamp: new Date().toISOString(),
+    severity,
+    title,
+    message,
+    jobId,
+    caseId,
+    methodId,
+    target,
+    workflowId,
+  });
+
+  // Stale Job Isolation:
+  // If an async notification belongs to an explicit workflow that is no longer active,
+  // do not show it as a floating toast on an unrelated workflow.
+  if (workflowId && STATE.currentTab && STATE.currentTab !== workflowId) {
+    console.info(`[DREX Job Isolation] Notice for workflow '${workflowId}' stored in history while on '${STATE.currentTab}'`);
+    return;
+  }
+
+  let container = document.getElementById('drexNotificationContainer');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'drexNotificationContainer';
+    container.style.cssText = 'position: fixed; top: 16px; right: 16px; z-index: 99999; display: flex; flex-direction: column; gap: 8px; max-width: 380px; width: calc(100% - 32px); pointer-events: none;';
+    document.body.appendChild(container);
+  }
+
+  const sevColors = {
+    PASS: { bg: '#ecfdf5', border: '#10b981', text: '#065f46', icon: '✓' },
+    FAIL: { bg: '#fef2f2', border: '#ef4444', text: '#991b1b', icon: '✕' },
+    WARN: { bg: '#fffbeb', border: '#f59e0b', text: '#92400e', icon: '⚠' },
+    INFO: { bg: '#eff6ff', border: '#3b82f6', text: '#1e40af', icon: 'ℹ' },
+  };
+  const color = sevColors[severity] || sevColors.INFO;
+
+  const item = document.createElement('div');
+  item.style.cssText = `pointer-events: auto; background: ${color.bg}; border: 1px solid ${color.border}; color: ${color.text}; padding: 12px 14px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); font-size: 12px; transition: all 0.3s ease;`;
+  item.innerHTML = `
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
+      <strong style="font-size: 12px; letter-spacing: 0.04em;">${color.icon} ${esc(title)}</strong>
+      <button style="background: none; border: none; font-size: 14px; line-height: 1; color: inherit; cursor: pointer; padding: 0;" onclick="this.closest('div').parentElement.remove()">&times;</button>
+    </div>
+    <div style="margin-top: 4px; line-height: 1.4; word-break: break-word;">${esc(message)}</div>
+    ${(jobId || caseId || methodId || target) ? `
+      <div style="margin-top: 6px; font-size: 10px; opacity: 0.85; font-family: var(--drex-font-mono);">
+        ${caseId ? `Case: ${esc(caseId)} ` : ''}${methodId ? `· Method: M${String(methodId).padStart(2, '0')} ` : ''}${target ? `· Target: ${esc(target)}` : ''}
+      </div>
+    ` : ''}
+  `;
+
+  container.appendChild(item);
+
+  if (durationMs > 0) {
+    setTimeout(() => {
+      item.style.opacity = '0';
+      item.style.transform = 'translateY(-10px)';
+      setTimeout(() => item.remove(), 300);
+    }, durationMs);
+  }
 }
 
 const esc = s => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -197,15 +267,22 @@ function renderOverview() {
 // 2. 25-Method Capability Matrix
 function useMethodFromMatrix(methodId) {
   const mId = parseInt(methodId, 10);
+  STATE.selectedMethodId = mId;
   if (mId >= 1 && mId <= 7) {
+    STATE.selectedDriveMethod = mId;
     navigateTo('drive_eraser');
   } else if (mId >= 8 && mId <= 16) {
+    STATE.selectedFileMethod = mId;
     navigateTo('file_eraser');
     setTimeout(() => {
       const sel = document.getElementById('shredMethodSelect');
-      if (sel) sel.value = String(mId);
+      if (sel) {
+        sel.value = String(mId);
+        if (typeof updateFileShredderPreflight === 'function') updateFileShredderPreflight();
+      }
     }, 50);
   } else if (mId >= 17 && mId <= 25) {
+    STATE.selectedRecoveryMethod = mId;
     navigateTo('recovery');
     setTimeout(() => {
       const sel = document.getElementById('recoveryMethodSelect');
@@ -216,13 +293,17 @@ function useMethodFromMatrix(methodId) {
 
 function viewMethodFromMatrix(methodId) {
   const mId = parseInt(methodId, 10);
-  if (mId >= 1 && mId <= 7) {
-    navigateTo('drive_eraser');
-  } else if (mId >= 8 && mId <= 16) {
-    navigateTo('file_eraser');
-  } else if (mId >= 17 && mId <= 25) {
-    navigateTo('recovery');
-  }
+  const method = (STATE.methodsRegistry || []).find(m => m.id === mId);
+  const title = method ? `[Method M${String(mId).padStart(2, '0')}] ${method.name}` : `Method M${String(mId).padStart(2, '0')}`;
+  const reqs = method ? (method.requirements || method.description || 'Standard forensic requirements apply.') : 'Standard requirements';
+  showNotification({
+    severity: 'INFO',
+    title: title,
+    message: reqs,
+    methodId: mId,
+    durationMs: 8000,
+  });
+  useMethodFromMatrix(methodId);
 }
 
 function render25Methods() {
@@ -324,7 +405,7 @@ function renderVault() {
       <div style="margin-top: 14px;">
         <span class="badge badge-pass">Active Case: ${esc(activeCaseNum)}</span>
         <span class="badge" style="background:#e0f2fe; color:#0369a1;">Read-Only Sealed</span>
-        <span class="badge" style="background:#f3e8ff; color:#6b21a8;">SHA-256 Merkle Bound</span>
+        <span class="badge" style="background:#f3e8ff; color:#6b21a8;">SHA-256 Hash-Linked Audit Chain</span>
       </div>
 
       <div id="vaultTableContainer" class="mt-16">
@@ -525,15 +606,15 @@ function renderRecovery() {
   const recoveryMethods = (STATE.methodsRegistry && STATE.methodsRegistry.length > 0)
     ? STATE.methodsRegistry.filter(m => m.category === 'Recovery' || (m.id >= 17 && m.id <= 25))
     : [
-        { id: 17, name: 'Quick Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 18, name: 'Smart Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 19, name: 'Targeted Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 20, name: 'Filesystem Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 21, name: 'Deep Recovery', status: 'PARTIAL' },
-        { id: 22, name: 'Fragment Recovery', status: 'PARTIAL' },
-        { id: 23, name: 'RAID / Storage Recovery', status: 'UNSUPPORTED' },
-        { id: 24, name: 'Damaged Media Recovery', status: 'BACKEND UNAVAILABLE' },
-        { id: 25, name: 'Forensic Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 17, name: 'Quick Recovery', status: 'KAT_VERIFIED / SUPPORTED' },
+        { id: 18, name: 'Smart Recovery', status: 'KAT_VERIFIED / SUPPORTED' },
+        { id: 19, name: 'Targeted Recovery', status: 'KAT_VERIFIED / SUPPORTED' },
+        { id: 20, name: 'Filesystem Recovery', status: 'KAT_VERIFIED / SUPPORTED' },
+        { id: 21, name: 'Deep Recovery', status: 'KAT_PARTIAL / HEURISTIC' },
+        { id: 22, name: 'Fragment Recovery', status: 'KAT_PARTIAL / SEAM-ANALYSIS' },
+        { id: 23, name: 'RAID / Storage Recovery', status: 'HARDWARE_REQUIRED / RAID_5' },
+        { id: 24, name: 'Damaged Media Recovery', status: 'BACKEND_UNAVAILABLE (GNU ddrescue required)' },
+        { id: 25, name: 'Forensic Recovery', status: 'KAT_VERIFIED / HASH-CHAIN' },
       ];
 
   const methodOptions = recoveryMethods.map(m => `
@@ -1171,9 +1252,10 @@ async function evaluateSanitizationPlan() {
             </div>
           </div>
           <div style="margin-top: 12px;">
-            <button class="action-btn" style="width: auto; padding: 6px 14px; font-size: 11px; background: var(--drex-status-fail); color: #fff;" onclick="openDestructiveConfirm('${esc(res.target_path)}', 'Storage Target')">Proceed to Drive Eraser →</button>
+            <button class="action-btn" style="width: auto; padding: 6px 14px; font-size: 11px; background: var(--drex-status-fail); color: #fff;" onclick="openDestructiveConfirm(STATE.lastPlannedTarget, 'Storage Target')">Proceed to Drive Eraser →</button>
           </div>
         `;
+        STATE.lastPlannedTarget = res.target_path;
       }
     }
   } catch (ex) {
@@ -1187,7 +1269,12 @@ async function evaluateSanitizationPlan() {
 
 // 13. Physical Drive Eraser
 function renderDriveEraser() {
-  const drives = STATE.devices.map(d => {
+  const activeMethodId = STATE.selectedDriveMethod || 1;
+  const activeMethod = (STATE.methodsRegistry || []).find(m => m.id === activeMethodId);
+  const methodName = activeMethod ? activeMethod.name : `Method M${String(activeMethodId).padStart(2, '0')}`;
+  const methodReqs = activeMethod && activeMethod.requirements ? activeMethod.requirements : 'Direct physical disk handle required. OS boot/system volumes protected by Win32 extent tripwire.';
+
+  const drives = STATE.devices.map((d, idx) => {
     const isLocked = d.is_system_disk || d.is_boot_disk;
     return `
       <div class="card" style="border-left: 4px solid ${isLocked ? 'var(--drex-status-fail)' : 'var(--drex-primary)'};">
@@ -1200,7 +1287,7 @@ function renderDriveEraser() {
           <div>
             ${isLocked
               ? `<button class="action-btn" style="background: #e2e8f0; color: #64748b; cursor: not-allowed;" disabled>LOCKED BY OS TRIPWIRE</button>`
-              : `<button class="action-btn" style="background: var(--drex-status-fail); color: #fff;" onclick="openDestructiveConfirm('${d.device_path}', '${d.model}')">Plan Sanitization →</button>`
+              : `<button class="action-btn" style="background: var(--drex-status-fail); color: #fff;" onclick="handleDriveEraseByIndex(${idx})">Plan Sanitization →</button>`
             }
           </div>
         </div>
@@ -1213,7 +1300,11 @@ function renderDriveEraser() {
       <div class="card-header">
         <div class="section-label">PRIVILEGED WORKSTATION OPERATION</div>
         <h2 class="card-title">Physical Drive Erasure & Media Sanitization</h2>
-        <p style="color: var(--drex-text-muted); font-size: 12px; margin-top: 4px;">
+        <div style="background: var(--drex-bg-surface-subtle); border-left: 3px solid var(--drex-primary); padding: 10px 14px; border-radius: 4px; margin-top: 8px; font-size: 12px;">
+          <strong>Active Method:</strong> [Method M${String(activeMethodId).padStart(2, '0')}] ${esc(methodName)}<br>
+          <span style="color: var(--drex-text-muted); font-size: 11px;">Requirements: ${esc(methodReqs)}</span>
+        </div>
+        <p style="color: var(--drex-text-muted); font-size: 12px; margin-top: 8px;">
           Hardware-qualified NIST SP 800-88 Rev. 2 Clear/Purge controller. Boot and operating system volumes are protected by dynamic Win32 volume extent tripwires.
         </p>
       </div>
@@ -1222,30 +1313,50 @@ function renderDriveEraser() {
   `;
 }
 
+function handleDriveEraseByIndex(idx) {
+  const d = STATE.devices[idx];
+  if (!d) return;
+  openDestructiveConfirm(d.device_path, d.model);
+}
+
 // 14. File & Folder CSPRNG Shredder
 function renderFileEraser() {
   const fileMethods = (STATE.methodsRegistry && STATE.methodsRegistry.length > 0)
     ? STATE.methodsRegistry.filter(m => m.category === 'File/Folder Erasure' || (m.id >= 8 && m.id <= 16))
     : [
-        { id: 8, name: 'CSPRNG Random Overwrite', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 9, name: 'Cryptographic Erasure', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 10, name: 'File Slack / Cluster-Tip', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 11, name: 'Filesystem Metadata Sanitization', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 12, name: 'NIST SP 800-88 File Policy Engine', status: 'PASS — DECISION ENGINE VERIFIED' },
-        { id: 13, name: 'Secure Free-Space Wiping', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 14, name: 'Single-Pass Zero Overwrite', status: 'PASS — REAL EXECUTION VERIFIED' },
-        { id: 15, name: 'Storage-Aware Sanitization Fallback', status: 'PASS — DECISION ENGINE VERIFIED' },
-        { id: 16, name: 'Temporary / Cache Sanitization', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 8, name: 'CSPRNG Random Overwrite', status: 'VALIDATED / CSPRNG' },
+        { id: 9, name: 'Cryptographic Erasure', status: 'VALIDATED / CRYPTO-ERASE' },
+        { id: 10, name: 'File Slack / Cluster-Tip', status: 'VALIDATED / SLACK-ZERO' },
+        { id: 11, name: 'Filesystem Metadata Sanitization', status: 'VALIDATED / METADATA-ZERO' },
+        { id: 12, name: 'NIST SP 800-88 File Policy Engine', status: 'DECISION_ENGINE_VERIFIED' },
+        { id: 13, name: 'Secure Free-Space Wiping', status: 'VALIDATED / UNALLOCATED-FILLER' },
+        { id: 14, name: 'Single-Pass Zero Overwrite', status: 'VALIDATED / ZERO-FILL' },
+        { id: 15, name: 'Storage-Aware Sanitization Fallback', status: 'DECISION_ENGINE_VERIFIED' },
+        { id: 16, name: 'Temporary / Cache Sanitization', status: 'VALIDATED / CACHE-PURGE' },
       ];
 
+  const selectedMid = STATE.selectedFileMethod || 8;
   const methodOptions = fileMethods.map(m => `
-    <option value="${m.id}" ${m.id === 8 ? 'selected' : ''}>[Method ${String(m.id).padStart(2, '0')}] ${esc(m.name)} (${esc(m.status)})</option>
+    <option value="${m.id}" ${m.id === selectedMid ? 'selected' : ''}>[Method ${String(m.id).padStart(2, '0')}] ${esc(m.name)} (${esc(m.status)})</option>
   `).join('');
+
+  setTimeout(() => {
+    updateFileShredderPreflight();
+    const targetInput = document.getElementById('shredTargetPath');
+    const phraseInput = document.getElementById('shredPhraseInput');
+    const methodSelect = document.getElementById('shredMethodSelect');
+    if (targetInput) targetInput.addEventListener('input', updateFileShredderPreflight);
+    if (phraseInput) phraseInput.addEventListener('input', updateFileShredderPreflight);
+    if (methodSelect) methodSelect.addEventListener('change', updateFileShredderPreflight);
+  }, 50);
 
   return `
     <div class="card">
       <div class="section-label">METHOD 08–16 · LOGICAL OVERWRITE SHREDDER & SANITIZERS</div>
-      <h2 class="card-title">File & Folder CSPRNG Shredder</h2>
+      <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px;">
+        <h2 class="card-title" style="margin-bottom: 0;">File & Folder CSPRNG Shredder</h2>
+        <div id="shredPreflightBadge"><span class="badge badge-warn">NOT_READY (Preconditions Pending)</span></div>
+      </div>
       <p style="color: var(--drex-text-muted); font-size: 12px; margin-top: 4px;">
         Securely sanitizes logical files, directories, slack bytes, and container keys using standards-aligned algorithms (CSPRNG, NIST Clear, Slack Zero, Crypto Invalidation).
       </p>
@@ -1267,13 +1378,72 @@ function renderFileEraser() {
         </div>
       </div>
 
-      <div style="display: flex; gap: 10px; margin-top: 14px;">
-        <button class="action-btn" style="width: auto; background: var(--drex-status-fail); color: #fff;" onclick="executeFileShredder()">⚡ Execute Secure Overwrite</button>
+      <div style="display: flex; gap: 10px; margin-top: 14px; align-items: center;">
+        <button class="action-btn" id="executeFileShredderBtn" style="width: auto; background: var(--drex-status-fail); color: #fff;" disabled onclick="executeFileShredder()">⚡ Execute Secure Overwrite</button>
+        <span id="shredPreflightDetail" style="font-size: 11px; color: var(--drex-text-muted);"></span>
       </div>
 
       <div id="shredResultBox" style="display: none; margin-top: 14px; padding: 12px; border-radius: 4px; font-size: 12px;"></div>
     </div>
   `;
+}
+
+function updateFileShredderPreflight() {
+  const targetEl = document.getElementById('shredTargetPath');
+  const phraseEl = document.getElementById('shredPhraseInput');
+  const badgeEl = document.getElementById('shredPreflightBadge');
+  const detailEl = document.getElementById('shredPreflightDetail');
+  const btnEl = document.getElementById('executeFileShredderBtn');
+  if (!targetEl || !phraseEl || !badgeEl || !btnEl) return;
+
+  const target = targetEl.value.trim();
+  const phrase = phraseEl.value.trim();
+  const caseId = getActiveCaseId();
+
+  const isSystem = (
+    target.toUpperCase().startsWith('C:\\WINDOWS') ||
+    target.toUpperCase().startsWith('C:\\PROGRAM FILES') ||
+    target.toUpperCase() === 'C:' ||
+    target.toUpperCase() === 'C:\\' ||
+    target.toUpperCase().startsWith('\\\\.\\C:') ||
+    target.toUpperCase().includes('PHYSICALDRIVE0')
+  );
+
+  if (isSystem) {
+    badgeEl.innerHTML = '<span class="badge badge-fail">EXECUTION_DISABLED (OS System Protected)</span>';
+    if (detailEl) detailEl.textContent = 'Active OS boot/system drive protected by tripwire.';
+    btnEl.disabled = true;
+    return;
+  }
+
+  if (!caseId) {
+    badgeEl.innerHTML = '<span class="badge badge-warn">NOT_READY (No Active Case)</span>';
+    if (detailEl) detailEl.textContent = 'Select or register an operational case.';
+    btnEl.disabled = true;
+    return;
+  }
+
+  if (!target) {
+    badgeEl.innerHTML = '<span class="badge badge-warn">NOT_READY (Target Missing)</span>';
+    if (detailEl) detailEl.textContent = 'Enter target path.';
+    btnEl.disabled = true;
+    return;
+  }
+
+  const cleanTarget = target.replace(/[\\\/.]/g, '_').replace(/^_+|_+$/g, '').toUpperCase();
+  const expectedPhrase = `ERASE-${cleanTarget}-PERMANENT`;
+
+  if (phrase !== expectedPhrase) {
+    badgeEl.innerHTML = '<span class="badge badge-warn">NOT_READY (Confirmation Pending)</span>';
+    if (detailEl) detailEl.innerHTML = `Enter confirmation phrase: <code>${expectedPhrase}</code>`;
+    btnEl.disabled = true;
+    return;
+  }
+
+  // All preflight checks passed
+  badgeEl.innerHTML = '<span class="badge badge-pass">READY_TO_EXECUTE</span>';
+  if (detailEl) detailEl.textContent = 'Preflight validated. Ready for execution.';
+  btnEl.disabled = false;
 }
 
 async function executeFileShredder() {
@@ -1324,6 +1494,8 @@ async function executeFileShredder() {
       }),
     });
 
+    STATE.pendingDestructiveTarget = target;
+
     if (resultBox) {
       resultBox.style.background = '#ecfdf5';
       resultBox.style.color = '#065f46';
@@ -1338,12 +1510,30 @@ async function executeFileShredder() {
         </div>
       `;
     }
+
+    showNotification({
+      severity: 'PASS',
+      title: 'FILE SHREDDING VERIFIED',
+      message: `Verdict: ${res.verdict} | Entropy: ${res.entropy_h} bits/byte | Bytes: ${res.bytes_written}`,
+      jobId: res.job_id,
+      caseId: caseId,
+      methodId: methodId,
+      target: target,
+    });
   } catch (ex) {
     if (resultBox) {
       resultBox.style.background = '#fef2f2';
       resultBox.style.color = '#991b1b';
       resultBox.innerHTML = `✕ Shredding Failed: ${esc(ex.message)}`;
     }
+    showNotification({
+      severity: 'FAIL',
+      title: 'SHREDDING FAILED',
+      message: ex.message,
+      caseId: caseId,
+      methodId: methodId,
+      target: target,
+    });
   }
 }
 
@@ -1914,7 +2104,7 @@ function renderReports() {
 
       <div style="margin-top: 14px;">
         <span class="badge badge-pass">Active Case: ${esc(activeCaseNum)}</span>
-        <span class="badge" style="background:#e0f2fe; color:#0369a1;">ISO/IEC 27037 Compliant</span>
+        <span class="badge" style="background:#e0f2fe; color:#0369a1;">ISO/IEC 27037-aligned</span>
       </div>
 
       <div id="reportDossierContent" class="mt-16">
@@ -2228,7 +2418,11 @@ function renderSettings() {
 async function triggerCaseBackup() {
   const resultBox = document.getElementById('settingsResultBox');
   if (!STATE.activeCase) {
-    alert('No active case selected.');
+    showNotification({
+      severity: 'WARN',
+      title: 'BACKUP BLOCKED',
+      message: 'No active case selected. Please select a case first.',
+    });
     return;
   }
   if (resultBox) {
@@ -2251,12 +2445,23 @@ async function triggerCaseBackup() {
         Archive SHA-256: <code>${esc(res.archive_sha256)}</code>
       `;
     }
+    showNotification({
+      severity: 'PASS',
+      title: 'BACKUP COMPLETED',
+      message: `Sealed case backup created at ${res.backup_path}`,
+      caseId: STATE.activeCase.case_id,
+    });
   } catch (ex) {
     if (resultBox) {
       resultBox.style.background = '#fef2f2';
       resultBox.style.color = '#991b1b';
       resultBox.innerHTML = `✕ Backup Error: ${esc(ex.message)}`;
     }
+    showNotification({
+      severity: 'FAIL',
+      title: 'BACKUP FAILED',
+      message: ex.message,
+    });
   }
 }
 
@@ -2264,7 +2469,11 @@ async function triggerCaseRestore() {
   const path = document.getElementById('restorePathInput').value;
   const resultBox = document.getElementById('settingsResultBox');
   if (!path) {
-    alert('Please enter backup ZIP archive path.');
+    showNotification({
+      severity: 'WARN',
+      title: 'RESTORE BLOCKED',
+      message: 'Please enter backup ZIP archive path.',
+    });
     return;
   }
   if (resultBox) {
@@ -2358,27 +2567,30 @@ function navigateTo(viewId) {
 
 // ─── Actions & Modals ─────────────────────────────────────────────────────────
 
+// ─── Actions & Modals ─────────────────────────────────────────────────────────
+
 async function runJudgeProofLoop() {
   const overlay = document.getElementById('modalOverlay');
   const box = document.getElementById('modalBox');
 
   box.innerHTML = `
     <h3 style="font-size: 17px; margin-bottom: 8px;">✦ Executing Deterministic Judge Proof Loop</h3>
-    <p style="font-size: 12px; color: var(--drex-text-muted);">Running end-to-end closed loop proof: Case Creation $\\to$ Probe $\\to$ Carve $\\to$ NIST Clear $\\to$ Audit Seal.</p>
+    <p style="font-size: 12px; color: var(--drex-text-muted);">Running end-to-end closed loop proof on isolated evaluation case.</p>
     <div id="proofProgress" style="margin: 16px 0; font-family: var(--drex-font-mono); font-size: 11px; background:#0b1f3a; color:#a5f3fc; padding:12px; border-radius:4px; max-height:160px; overflow-y:auto;">
-      [1/6] Initializing tamper-evident demonstration case...<br>
+      [1/6] Initializing tamper-evident demonstration evaluation case...<br>
     </div>
     <button class="action-btn" style="background:#cbd5e1; color:#334155;" id="proofCloseBtn" disabled onclick="closeModal()">Running Proof Loop...</button>
   `;
   overlay.style.display = 'grid';
 
   try {
+    const preservedCase = STATE.activeCase;
     const result = await api('/api/demo/flow', { method: 'POST' });
     const log = document.getElementById('proofProgress');
     result.steps_completed.forEach(s => {
       log.innerHTML += `✓ Step ${s.step}: ${esc(s.title)} (${esc(s.detail)})<br>`;
     });
-    log.innerHTML += `<strong style="color: #4ade80;">★ VERDICT: ${esc(result.verdict)} (Elapsed: ${result.elapsed_seconds}s)</strong>`;
+    log.innerHTML += `<strong style="color: #4ade80;">★ VERDICT: ${esc(result.verdict)} (Elapsed: ${result.elapsed_seconds}s)</strong><br><small style="color: #94a3b8;">Evaluation Case: ${esc(result.case_number)}</small>`;
 
     const closeBtn = document.getElementById('proofCloseBtn');
     closeBtn.disabled = false;
@@ -2386,15 +2598,36 @@ async function runJudgeProofLoop() {
     closeBtn.style.color = '#fff';
     closeBtn.textContent = 'Demo Proof Completed — Close';
 
-    // Refresh state
-    await loadInitialData();
+    showNotification({
+      severity: 'PASS',
+      title: 'JUDGE PROOF COMPLETED',
+      message: `Evaluation Case ${result.case_number} sealed with verdict: ${result.verdict}`,
+      caseId: result.case_id,
+    });
+
+    // Refresh state while preserving user operational case
+    await loadInitialData(preservedCase ? preservedCase.case_id : null);
   } catch (ex) {
     document.getElementById('proofProgress').innerHTML += `<span style="color: #f87171;">Error: ${esc(ex.message)}</span>`;
     document.getElementById('proofCloseBtn').disabled = false;
+    showNotification({
+      severity: 'FAIL',
+      title: 'JUDGE PROOF ERROR',
+      message: ex.message,
+    });
   }
 }
 
 function openDestructiveConfirm(devicePath, model) {
+  if (!devicePath) {
+    showNotification({
+      severity: 'WARN',
+      title: 'TARGET INVALID',
+      message: 'No storage device target specified.',
+    });
+    return;
+  }
+
   const cleanTarget = devicePath.replace(/[\\\/.]/g, '_').replace(/^_+|_+$/g, '').toUpperCase();
   const phrase = `ERASE-${cleanTarget}-PERMANENT`;
 
@@ -2403,49 +2636,94 @@ function openDestructiveConfirm(devicePath, model) {
     <div style="color: var(--drex-status-fail); font-weight: 800; font-size: 12px; letter-spacing: 0.08em;">⚠ CRITICAL DESTRUCTIVE OPERATION</div>
     <h3 style="font-size: 17px; margin: 4px 0 8px;">Confirm Storage Sanitization</h3>
     <p style="font-size: 12px; color: var(--drex-text-muted);">
-      Target Device: <strong>${esc(model)} (${esc(devicePath)})</strong>.<br>
-      This will permanently overwrite all addressable blocks. To proceed, enter the exact verification phrase below:
+      Target Device: <strong>${esc(model || 'Physical Drive')} (<code>${esc(devicePath)}</code>)</strong>.<br>
+      This will permanently overwrite addressable blocks. To proceed, enter the exact verification phrase below:
     </p>
     <div class="safety-phrase-box">${phrase}</div>
     <input type="text" id="safetyPhraseInput" class="safety-input" placeholder="Type exact phrase here..." autocomplete="off">
     <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px;">
       <button class="action-btn" style="width: auto; background: #e2e8f0; color: #334155;" onclick="closeModal()">Cancel</button>
-      <button class="action-btn" style="width: auto; background: var(--drex-status-fail); color: #fff;" id="confirmEraseBtn" disabled onclick="submitSanitization('${esc(devicePath)}', 8, '${phrase}')">Execute Sanitization</button>
+      <button class="action-btn" style="width: auto; background: var(--drex-status-fail); color: #fff;" id="confirmEraseBtn" disabled>Execute Sanitization</button>
     </div>
   `;
 
   document.getElementById('modalOverlay').style.display = 'grid';
 
+  const confirmBtn = document.getElementById('confirmEraseBtn');
   const input = document.getElementById('safetyPhraseInput');
   input.addEventListener('input', () => {
-    document.getElementById('confirmEraseBtn').disabled = input.value.trim() !== phrase;
+    confirmBtn.disabled = input.value.trim() !== phrase;
   });
+
+  // Attach safe function closure avoiding string escaping bugs
+  confirmBtn.onclick = () => {
+    const selectedMethod = STATE.selectedDriveMethod || 8;
+    submitSanitization(devicePath, selectedMethod, phrase);
+  };
 }
 
 async function submitSanitization(devicePath, methodId, phrase) {
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    showNotification({
+      severity: 'FAIL',
+      title: 'OPERATION BLOCKED',
+      message: 'No active case selected. Please select or register an operational case first.',
+      target: devicePath,
+    });
+    return;
+  }
+
   try {
     const res = await api('/api/sanitization/execute', {
       method: 'POST',
       body: JSON.stringify({
+        case_id: caseId,
         target_path: devicePath,
         method_id: methodId,
         safety_phrase_entered: phrase,
       }),
     });
-    alert(`Sanitization Succeeded! Job ID: ${res.job_id}\nVerdict: ${res.verdict}\nEntropy: ${res.entropy_h} bits/byte`);
+
+    STATE.pendingDestructiveTarget = devicePath;
+
+    showNotification({
+      severity: 'PASS',
+      title: 'SANITIZATION VERIFIED',
+      message: `Job ${res.job_id}: ${res.verdict} | Observed Entropy: ${res.entropy_h} bits/byte | Mismatches: ${res.readback_mismatches}`,
+      jobId: res.job_id,
+      caseId: caseId,
+      methodId: methodId,
+      target: devicePath,
+    });
     closeModal();
     navigateTo('verification');
   } catch (ex) {
-    alert(`Sanitization Blocked: ${ex.message}`);
+    showNotification({
+      severity: 'FAIL',
+      title: 'SANITIZATION BLOCKED',
+      message: ex.message,
+      caseId: caseId,
+      methodId: methodId,
+      target: devicePath,
+    });
   }
 }
 
 async function verifyAuditChain() {
   try {
     const res = await api('/api/audit/verify', { method: 'POST' });
-    alert(`Audit Chain Verdict: ${res.verdict}\nVerified Records: ${res.verified_records_count}`);
+    showNotification({
+      severity: res.valid ? 'PASS' : 'FAIL',
+      title: 'AUDIT CHAIN VERIFIED',
+      message: `Verdict: ${res.verdict} | Verified Records: ${res.verified_records_count}`,
+    });
   } catch (ex) {
-    alert(`Audit Verification Failed: ${ex.message}`);
+    showNotification({
+      severity: 'FAIL',
+      title: 'AUDIT VERIFICATION FAILED',
+      message: ex.message,
+    });
   }
 }
 
@@ -2465,8 +2743,18 @@ async function runDemoPackageVerification() {
         </ul>
       </div>
     `;
+    showNotification({
+      severity: res.exit_code === 0 ? 'PASS' : 'FAIL',
+      title: 'INDEPENDENT VERIFICATION',
+      message: `Verdict: ${res.verdict} (Schema ${res.schema_version})`,
+    });
   } catch (ex) {
     out.innerHTML = `<span style="color: var(--drex-status-fail);">Verification Error: ${esc(ex.message)}</span>`;
+    showNotification({
+      severity: 'FAIL',
+      title: 'VERIFICATION ERROR',
+      message: ex.message,
+    });
   }
 }
 
@@ -2481,6 +2769,12 @@ function selectCase(caseId) {
     STATE.activeCase = c;
     const pill = document.getElementById('activeCasePill');
     if (pill) pill.textContent = `Active Case: ${c.case_number}`;
+    showNotification({
+      severity: 'INFO',
+      title: 'ACTIVE CASE SWITCHED',
+      message: `Switched to operational case ${c.case_number} (${c.title})`,
+      caseId: c.case_id,
+    });
     navigateTo(STATE.currentView);
   }
 }
@@ -2501,22 +2795,48 @@ function promptCreateCase() {
       organization: 'NTRO Forensic Lab',
       notes: 'Case initialized via WebUI Workstation.',
     }),
-  }).then(async () => {
-    alert(`Case ${cNum} registered!`);
-    await loadInitialData();
+  }).then(async (newCase) => {
+    showNotification({
+      severity: 'PASS',
+      title: 'CASE REGISTERED',
+      message: `Operational case ${cNum} registered and sealed into vault.`,
+      caseId: newCase ? newCase.case_id : null,
+    });
+    await loadInitialData(newCase ? newCase.case_id : null);
   }).catch(err => {
-    alert(`Failed to create case: ${err.message}`);
+    showNotification({
+      severity: 'FAIL',
+      title: 'CASE REGISTRATION FAILED',
+      message: err.message,
+    });
   });
 }
 
 async function triggerRecoveryScan() {
   const caseId = getActiveCaseId();
   if (!caseId) {
-    alert('No active case selected. Please register or select a case first.');
+    showNotification({
+      severity: 'WARN',
+      title: 'SCAN BLOCKED',
+      message: 'No active case selected. Please register or select a case first.',
+    });
     return;
   }
   try {
-    const target = (STATE.devices && STATE.devices.length > 0) ? STATE.devices[0].device_path : '\\\\.\\\\PhysicalDrive99';
+    const targetSelect = document.getElementById('recoveryTargetSelect');
+    let target = targetSelect ? targetSelect.value : null;
+    if (!target && STATE.devices && STATE.devices.length > 0) {
+      target = STATE.devices[0].device_path;
+    }
+    if (!target) {
+      showNotification({
+        severity: 'FAIL',
+        title: 'TARGET INVALID',
+        message: 'No storage device target or image selected for recovery scan.',
+        caseId: caseId,
+      });
+      return;
+    }
     const methodSelect = document.getElementById('recoveryMethodSelect');
     const methodId = methodSelect ? methodSelect.value : '17';
     const res = await api('/api/recovery/scan', {
@@ -2528,17 +2848,34 @@ async function triggerRecoveryScan() {
         engine: String(methodId),
       }),
     });
-    alert(`Recovery Scan initiated: Job ID ${res.job_id || 'N/A'} (Engine: ${res.engine || methodId})`);
-    await loadInitialData();
+    showNotification({
+      severity: 'PASS',
+      title: 'RECOVERY STARTED',
+      message: `Job ID ${res.job_id || 'N/A'}: Engine ${res.engine || methodId} running on ${target}`,
+      jobId: res.job_id,
+      caseId: caseId,
+      methodId: methodId,
+      target: target,
+    });
+    await loadInitialData(caseId);
   } catch (ex) {
-    alert(`Recovery Scan Notice: ${ex.message}`);
+    showNotification({
+      severity: 'FAIL',
+      title: 'RECOVERY NOTICE',
+      message: ex.message,
+      caseId: caseId,
+    });
   }
 }
 
 async function triggerCandidateExtract(candidateId) {
   const caseId = getActiveCaseId();
   if (!caseId) {
-    alert('No active case selected. Please register or select a case first.');
+    showNotification({
+      severity: 'WARN',
+      title: 'EXTRACTION BLOCKED',
+      message: 'No active case selected. Please register or select a case first.',
+    });
     return;
   }
   try {
@@ -2550,10 +2887,20 @@ async function triggerCandidateExtract(candidateId) {
         notes: 'Analyst requested evidence vault ingestion',
       }),
     });
-    alert(`Candidate Extracted to Evidence Vault!\nVault Object ID: ${res.vault_object_id}\nFilename: ${res.filename}\nSHA-256: ${res.sha256.substring(0, 16)}...\nAudit Event: ${res.audit_event_id}`);
-    await loadInitialData();
+    showNotification({
+      severity: 'PASS',
+      title: 'EVIDENCE INGESTED',
+      message: `Candidate extracted to Vault: ${res.filename} (${formatBytes(res.size_bytes)}) | SHA-256: ${(res.sha256 || '').substring(0, 16)}...`,
+      caseId: caseId,
+    });
+    await loadInitialData(caseId);
   } catch (ex) {
-    alert(`Vault Extraction Failed: ${ex.message}`);
+    showNotification({
+      severity: 'FAIL',
+      title: 'EXTRACTION FAILED',
+      message: ex.message,
+      caseId: caseId,
+    });
   }
 }
 
@@ -2562,24 +2909,40 @@ async function triggerFragmentReconstructionDemo() {
 }
 
 async function generateCertificateForActiveCase() {
-  if (!STATE.activeCase) {
-    alert('No active case selected.');
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    showNotification({
+      severity: 'WARN',
+      title: 'CERTIFICATE BLOCKED',
+      message: 'No active case selected.',
+    });
     return;
   }
   try {
+    const targetIdent = STATE.pendingDestructiveTarget || (STATE.devices && STATE.devices.length > 0 ? STATE.devices[0].device_path : 'LOGICAL_STORAGE_TARGET');
     const res = await api('/api/certificates/generate', {
       method: 'POST',
       body: JSON.stringify({
-        case_id: STATE.activeCase.case_id,
-        target_identifier: 'PHYSICALDRIVE1_LOGICAL_TARGET',
-        method_id: 8,
+        case_id: caseId,
+        target_identifier: targetIdent,
+        method_id: STATE.selectedDriveMethod || 8,
         examiner_name: STATE.currentRole || 'Forensic Examiner',
       }),
     });
-    alert(`Certificate ${res.certificate_id} issued successfully!`);
+    showNotification({
+      severity: 'PASS',
+      title: 'CERTIFICATE ISSUED',
+      message: `Certificate ${res.certificate_id} issued successfully and bound to case.`,
+      caseId: caseId,
+    });
     loadCertificates();
   } catch (ex) {
-    alert(`Certificate generation failed: ${ex.message || String(ex)}`);
+    showNotification({
+      severity: 'FAIL',
+      title: 'CERTIFICATE FAILED',
+      message: ex.message || String(ex),
+      caseId: caseId,
+    });
   }
 }
 
@@ -2657,6 +3020,8 @@ window.loadHexPreset = loadHexPreset;
 window.renderHexDump = renderHexDump;
 window.evaluateSanitizationPlan = evaluateSanitizationPlan;
 window.executeFileShredder = executeFileShredder;
+window.updateFileShredderPreflight = updateFileShredderPreflight;
+window.handleDriveEraseByIndex = handleDriveEraseByIndex;
 window.runValidationLabSuite = runValidationLabSuite;
 window.loadValidationReports = loadValidationReports;
 window.verifyValidationReport = verifyValidationReport;
@@ -2666,6 +3031,7 @@ window.loadCaseReport = loadCaseReport;
 window.loadDeviceQualifications = loadDeviceQualifications;
 window.triggerCaseBackup = triggerCaseBackup;
 window.triggerCaseRestore = triggerCaseRestore;
+window.showNotification = showNotification;
 
 // ─── Persona Switcher ─────────────────────────────────────────────────────────
 
@@ -2686,7 +3052,7 @@ async function handlePersonaChange(role) {
 
 // ─── Initial Data Bootstrap ───────────────────────────────────────────────────
 
-async function loadInitialData() {
+async function loadInitialData(preserveCaseId = null) {
   try {
     // 1. Initial Persona Switch
     const authRes = await api('/api/auth/switch-persona', {
@@ -2704,8 +3070,21 @@ async function loadInitialData() {
 
     // 4. Load Cases
     STATE.cases = await api('/api/cases').catch(() => []);
-    if (STATE.cases.length > 0) {
+    
+    // Case isolation: preserve active operational case if specified or already set
+    const targetCaseId = preserveCaseId || (STATE.activeCase ? STATE.activeCase.case_id : null);
+    if (targetCaseId) {
+      const match = STATE.cases.find(c => c.case_id === targetCaseId);
+      if (match) {
+        STATE.activeCase = match;
+      } else if (STATE.cases.length > 0) {
+        STATE.activeCase = STATE.cases[0];
+      }
+    } else if (STATE.cases.length > 0) {
       STATE.activeCase = STATE.cases[0];
+    }
+
+    if (STATE.activeCase) {
       const pill = document.getElementById('activeCasePill');
       if (pill) pill.textContent = `Active Case: ${STATE.activeCase.case_number}`;
     }
