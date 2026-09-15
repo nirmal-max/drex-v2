@@ -2625,6 +2625,7 @@ async function triggerCaseBackup() {
       severity: 'WARN',
       title: 'BACKUP BLOCKED',
       message: 'No active case selected. Please select a case first.',
+      workflowId: 'settings',
     });
     return;
   }
@@ -2653,6 +2654,7 @@ async function triggerCaseBackup() {
       title: 'BACKUP COMPLETED',
       message: `Sealed case backup created at ${res.backup_path}`,
       caseId: STATE.activeCase.case_id,
+      workflowId: 'settings',
     });
   } catch (ex) {
     if (resultBox) {
@@ -2664,6 +2666,7 @@ async function triggerCaseBackup() {
       severity: 'FAIL',
       title: 'BACKUP FAILED',
       message: ex.message,
+      workflowId: 'settings',
     });
   }
 }
@@ -2676,6 +2679,7 @@ async function triggerCaseRestore() {
       severity: 'WARN',
       title: 'RESTORE BLOCKED',
       message: 'Please enter backup ZIP archive path.',
+      workflowId: 'settings',
     });
     return;
   }
@@ -2722,13 +2726,14 @@ function navigateTo(viewId) {
   }
 
   // Stale Toast Cleanup on Navigation:
-  // Dismiss any floating toasts belonging to a different workflow so they do not linger across views
+  // Dismiss any floating toasts belonging to a different workflow or different case
   const container = document.getElementById('drexNotificationContainer');
   if (container) {
+    const activeCase = getActiveCaseId();
     Array.from(container.querySelectorAll('.drex-toast-item')).forEach(toast => {
       const toastWf = toast.dataset.workflowId;
-      const toastScope = toast.dataset.scope;
-      if (toastWf && toastWf !== viewId && toastScope === 'WORKFLOW') {
+      const toastCase = toast.dataset.caseId;
+      if ((toastWf && toastWf !== viewId) || (toastCase && activeCase && toastCase !== activeCase)) {
         toast.remove();
       }
     });
@@ -2824,6 +2829,7 @@ async function runJudgeProofLoop() {
       title: 'JUDGE PROOF COMPLETED',
       message: `Evaluation Case ${result.case_number} sealed with verdict: ${result.verdict}`,
       caseId: result.case_id,
+      workflowId: 'judge_demo',
     });
 
     // Refresh state while preserving user operational case
@@ -2835,6 +2841,7 @@ async function runJudgeProofLoop() {
       severity: 'FAIL',
       title: 'JUDGE PROOF ERROR',
       message: ex.message,
+      workflowId: 'judge_demo',
     });
   }
 }
@@ -2845,6 +2852,7 @@ function openDestructiveConfirm(devicePath, model) {
       severity: 'WARN',
       title: 'TARGET INVALID',
       message: 'No storage device target specified.',
+      workflowId: 'drive_eraser',
     });
     return;
   }
@@ -2935,18 +2943,23 @@ async function submitSanitization(devicePath, methodId, phrase) {
 }
 
 async function verifyAuditChain() {
+  const caseId = getActiveCaseId();
   try {
     const res = await api('/api/audit/verify', { method: 'POST' });
     showNotification({
       severity: res.valid ? 'PASS' : 'FAIL',
       title: 'AUDIT CHAIN VERIFIED',
       message: `Verdict: ${res.verdict} | Verified Records: ${res.verified_records_count}`,
+      caseId: caseId,
+      workflowId: 'audit',
     });
   } catch (ex) {
     showNotification({
       severity: 'FAIL',
       title: 'AUDIT VERIFICATION FAILED',
       message: ex.message,
+      caseId: caseId,
+      workflowId: 'audit',
     });
   }
 }
@@ -2971,6 +2984,7 @@ async function runDemoPackageVerification() {
       severity: res.exit_code === 0 ? 'PASS' : 'FAIL',
       title: 'INDEPENDENT VERIFICATION',
       message: `Verdict: ${res.verdict} (Schema ${res.schema_version})`,
+      workflowId: 'verifier',
     });
   } catch (ex) {
     out.innerHTML = `<span style="color: var(--drex-status-fail);">Verification Error: ${esc(ex.message)}</span>`;
@@ -2978,6 +2992,7 @@ async function runDemoPackageVerification() {
       severity: 'FAIL',
       title: 'VERIFICATION ERROR',
       message: ex.message,
+      workflowId: 'verifier',
     });
   }
 }

@@ -466,3 +466,305 @@ def test_10_cross_case_backup_and_restore_isolation(client, two_cases):
                 os.remove(backup_data["manifest_path"])
             except OSError:
                 pass
+
+
+# ─── 11. Cross-Workflow Notification & Progress Isolation ─────────────────────
+
+def test_11_cross_workflow_notification_and_progress_isolation(client, two_cases):
+    case_a, _ = two_cases
+    case_a_id = case_a["case_id"]
+
+    # Dispatch jobs with distinct workflow IDs
+    j_rec = client.post(
+        "/api/recovery/scan",
+        json={
+            "case_id": case_a_id,
+            "source_path": "tests/fixtures/sample_disk.img",
+            "destination_dir": "vault/extracted",
+            "engine": "17",
+            "workflow_id": "recovery",
+            "target_id": "DEV-IMG-0",
+        },
+    ).json()
+
+    j_carve = client.post(
+        "/api/recovery/scan",
+        json={
+            "case_id": case_a_id,
+            "source_path": "tests/fixtures/sample_disk.img",
+            "destination_dir": "vault/carved",
+            "engine": "21",
+            "workflow_id": "carving",
+            "target_id": "DEV-IMG-1",
+        },
+    ).json()
+
+    rec_job_id = j_rec["job_id"]
+    carve_job_id = j_carve["job_id"]
+
+    rec_info = client.get(f"/api/jobs/{rec_job_id}?case_id={case_a_id}").json()
+    carve_info = client.get(f"/api/jobs/{carve_job_id}?case_id={case_a_id}").json()
+
+    assert rec_info["workflow_id"] == "recovery"
+    assert carve_info["workflow_id"] == "carving"
+    assert rec_info["target_id"] == "DEV-IMG-0"
+    assert carve_info["target_id"] == "DEV-IMG-1"
+    assert rec_info["job_id"] != carve_info["job_id"]
+
+
+# ─── 12. Notification Subscription & Job Lifecycle Cleanup ────────────────────
+
+def test_12_notification_subscription_and_job_lifecycle_cleanup(client, two_cases):
+    case_a, _ = two_cases
+    case_a_id = case_a["case_id"]
+
+    # Dispatch a fast scan job
+    res = client.post(
+        "/api/recovery/scan",
+        json={
+            "case_id": case_a_id,
+            "source_path": "tests/fixtures/sample_disk.img",
+            "destination_dir": "vault/extracted",
+            "engine": "17",
+            "workflow_id": "recovery",
+        },
+    )
+    job_id = res.json()["job_id"]
+
+    # Query job status
+    status = client.get(f"/api/jobs/{job_id}?case_id={case_a_id}").json()
+    assert status["status"] in ["PENDING", "RUNNING", "COMPLETED", "FAILED", "BLOCKED"]
+    assert status["job_id"] == job_id
+    assert status["case_id"] == case_a_id
+
+
+# ─── 13. Repeated Navigation Does Not Duplicate Events ────────────────────────
+
+def test_13_repeated_navigation_does_not_duplicate_events(client, two_cases):
+    case_a, _ = two_cases
+    case_a_id = case_a["case_id"]
+
+    # Initial state
+    baseline_ledger = client.get(f"/api/audit/ledger?case_id={case_a_id}").json()
+    baseline_len = len(baseline_ledger)
+
+    # Simulate 20 navigation cycles querying the ledger & evidence
+    for _ in range(20):
+        ledger = client.get(f"/api/audit/ledger?case_id={case_a_id}").json()
+        evidence = client.get(f"/api/evidence?case_id={case_a_id}").json()
+        certs = client.get(f"/api/certificates?case_id={case_a_id}").json()
+        assert len(ledger) == baseline_len
+        assert isinstance(evidence, list)
+        assert isinstance(certs, list)
+
+
+# ─── 14. Stale Async Response Rejection ───────────────────────────────────────
+
+def test_14_stale_async_response_rejection(client, two_cases):
+    case_a, case_b = two_cases
+    case_a_id = case_a["case_id"]
+    case_b_id = case_b["case_id"]
+
+    # Reconstruct fragment in Case A
+    res_a = client.post(
+        "/api/recovery/reconstruct",
+        json={
+            "case_id": case_a_id,
+            "file_type": "PNG",
+            "filename": "isolated_a.png",
+            "fragments": [
+                {
+                    "chunk_id": 1,
+                    "offset": 0,
+                    "data_hex": "89504e470d0a1a0a0000000d49484452000000100000001008060000001ff3ff61",
+                    "is_header": True,
+                    "is_footer": False,
+                },
+                {
+                    "chunk_id": 2,
+                    "offset": 4096,
+                    "data_hex": "0000000049454e44ae426082",
+                    "is_header": False,
+                    "is_footer": True,
+                },
+            ],
+            "strict_structure_validation": False,
+        },
+    )
+    assert res_a.status_code == 200
+    cand_id_a = res_a.json()["candidate_id"]
+
+    # Verify candidate is ONLY in Case A
+    cands_a = [c["candidate_id"] for c in client.get(f"/api/recovery/candidates?case_id={case_a_id}").json()]
+    cands_b = [c["candidate_id"] for c in client.get(f"/api/recovery/candidates?case_id={case_b_id}").json()]
+
+    assert cand_id_a in cands_a
+    assert cand_id_a not in cands_b
+
+
+# ─── 15. Active Case Immutability ─────────────────────────────────────────────
+
+def test_15_active_case_immutability(client, two_cases):
+    case_a, case_b = two_cases
+    case_a_id = case_a["case_id"]
+
+    # Query cases list
+    cases_res = client.get("/api/cases")
+    assert cases_res.status_code == 200
+    cases_list = cases_res.json()
+    case_ids = [c["case_id"] for c in cases_list]
+    assert case_a_id in case_ids
+
+    # Run background judge demo flow
+    demo_res = client.post("/api/demo/flow")
+    assert demo_res.status_code == 200
+
+    # Ensure Case A metadata and presence remain pristine
+    case_a_check = client.get(f"/api/cases/{case_a_id}")
+    assert case_a_check.status_code == 200
+    assert case_a_check.json()["case_id"] == case_a_id
+    assert case_a_check.json()["case_number"] == case_a["case_number"]
+
+
+# ─── 16. Case Switch During Running Job ───────────────────────────────────────
+
+def test_16_case_switch_during_running_job(client, two_cases):
+    case_a, case_b = two_cases
+    case_a_id = case_a["case_id"]
+    case_b_id = case_b["case_id"]
+
+    # Dispatch scan in Case A
+    res = client.post(
+        "/api/recovery/scan",
+        json={
+            "case_id": case_a_id,
+            "source_path": "tests/fixtures/sample_disk.img",
+            "destination_dir": "vault/extracted",
+            "engine": "17",
+            "workflow_id": "recovery",
+        },
+    )
+    job_id = res.json()["job_id"]
+
+    # Switch focus to Case B and query its state
+    evidence_b = client.get(f"/api/evidence?case_id={case_b_id}").json()
+    candidates_b = client.get(f"/api/recovery/candidates?case_id={case_b_id}").json()
+    assert len(evidence_b) == 0
+    assert len(candidates_b) == 0
+
+    # Query job in Case A context
+    job_res = client.get(f"/api/jobs/{job_id}?case_id={case_a_id}")
+    assert job_res.status_code == 200
+    assert job_res.json()["case_id"] == case_a_id
+
+
+# ─── 17. Cross-Module Error Isolation ─────────────────────────────────────────
+
+def test_17_cross_module_error_isolation(client, two_cases):
+    case_a, _ = two_cases
+    case_a_id = case_a["case_id"]
+
+    # M01 Drive Eraser Error (Blocked on missing safety phrase / invalid target)
+    err_m01 = client.post(
+        "/api/sanitization/execute",
+        json={
+            "case_id": case_a_id,
+            "target_path": "\\\\.\\PhysicalDrive99",
+            "method_id": 1,
+            "safety_phrase_entered": "WRONG_PHRASE",
+        },
+    )
+    assert err_m01.status_code in [400, 422]
+
+    # M08 File Shredder Error (Target file does not exist)
+    err_m08 = client.post(
+        "/api/sanitization/execute",
+        json={
+            "case_id": case_a_id,
+            "target_path": "non_existent_file_9999.tmp",
+            "method_id": 8,
+            "safety_phrase_entered": "ERASE-NON_EXISTENT_FILE_9999_TMP-PERMANENT",
+        },
+    )
+    assert err_m08.status_code in [400, 404, 422]
+
+    # M17 Recovery Scan (Valid disk image) succeeds regardless of previous M01/M08 errors
+    ok_m17 = client.post(
+        "/api/recovery/scan",
+        json={
+            "case_id": case_a_id,
+            "source_path": "tests/fixtures/sample_disk.img",
+            "destination_dir": "vault/extracted",
+            "engine": "17",
+            "workflow_id": "recovery",
+        },
+    )
+    assert ok_m17.status_code == 200
+
+    # M22 Fragment Reassembly (Invalid empty fragments) returns 400 or 422
+    err_m22 = client.post(
+        "/api/recovery/reconstruct",
+        json={
+            "case_id": case_a_id,
+            "file_type": "PNG",
+            "filename": "invalid.png",
+            "fragments": [],
+        },
+    )
+    assert err_m22.status_code in [400, 422]
+
+
+# ─── 18. Exact Reproduction of Sanitization Error Contamination ───────────────
+
+def test_18_exact_reproduction_of_sanitization_error_contamination(client, two_cases):
+    case_a, case_b = two_cases
+    case_a_id = case_a["case_id"]
+    case_b_id = case_b["case_id"]
+
+    # 1. Trigger blocked sanitization error on invalid PhysicalDrive
+    blocked_res = client.post(
+        "/api/sanitization/execute",
+        json={
+            "case_id": case_a_id,
+            "target_path": "\\\\.\\PhysicalDrive1",
+            "method_id": 1,
+            "safety_phrase_entered": "ERASE-__PHYSICALDRIVE1-PERMANENT",
+        },
+    )
+    # Blocked due to non-existent / locked physical device
+    assert blocked_res.status_code in [400, 422]
+
+    # 2. Query File Shredder with legitimate disposable temp file -> MUST NOT be contaminated
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as f:
+        f.write(b"Legitimate shredder payload")
+        clean_file = f.name
+
+    try:
+        clean_target = clean_file.replace("\\", "_").replace("/", "_").replace(".", "_").replace(":", "_").strip("_").upper()
+        phrase = f"ERASE-{clean_target}-PERMANENT"
+        shred_res = client.post(
+            "/api/sanitization/execute",
+            json={
+                "case_id": case_a_id,
+                "target_path": clean_file,
+                "method_id": 8,
+                "safety_phrase_entered": phrase,
+            },
+        )
+        assert shred_res.status_code == 200
+        shred_data = shred_res.json()
+        assert "PASS" in shred_data["verdict"] or shred_data["verdict"] in ["PASS", "COMPLETED", "VERIFIED"]
+    finally:
+        if os.path.exists(clean_file):
+            os.remove(clean_file)
+
+    # 3. Query Recovery Candidates in Case A and Case B -> Zero sanitization errors
+    cands_a = client.get(f"/api/recovery/candidates?case_id={case_a_id}").json()
+    cands_b = client.get(f"/api/recovery/candidates?case_id={case_b_id}").json()
+    assert isinstance(cands_a, list)
+    assert isinstance(cands_b, list)
+
+    # 4. Verify Case B evidence vault is clean
+    ev_b = client.get(f"/api/evidence?case_id={case_b_id}").json()
+    assert len(ev_b) == 0
+

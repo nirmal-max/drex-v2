@@ -747,6 +747,27 @@ def create_case(req: models.ForensicCaseCreate, current_user: Dict[str, Any] = D
     )
 
 
+@app.get("/api/cases/{case_id}", response_model=models.ForensicCaseRecord)
+def get_case_by_id(case_id: str, current_user: Dict[str, Any] = Depends(require_permission("cases:read"))):
+    """Retrieve details for a specific forensic case."""
+    c = case_manager.get_case(case_id)
+    if not c:
+        raise HTTPException(status_code=404, detail=f"Case '{case_id}' not found")
+    ev_list = case_manager.list_evidence(c.case_id)
+    return models.ForensicCaseRecord(
+        case_id=c.case_id,
+        case_number=c.case_number,
+        title=c.title,
+        examiner=c.examiner,
+        organization=c.organization,
+        status=c.status.value if hasattr(c.status, "value") else str(c.status),
+        created_utc=c.created_at,
+        updated_utc=c.updated_at,
+        evidence_count=len(ev_list),
+        notes="\n".join(c.notes) if isinstance(c.notes, list) else str(c.notes),
+    )
+
+
 @app.get("/api/cases/{case_id}/timeline", response_model=List[models.TimelineEventRecord])
 def get_case_timeline(case_id: str, current_user: Dict[str, Any] = Depends(require_permission("timeline:read"))):
     """Retrieve chronologically ordered, hash-bound timeline events for a case."""
@@ -930,7 +951,15 @@ def launch_recovery_scan(
 ):
     """Launch non-blocking forensic recovery or raw carving scan with duplicate detection and target lock."""
     # 1. Resolve Case Context
-    if not req.case_id:
+    if req.case_id:
+        c = case_manager.get_case(req.case_id)
+        if not c:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid case ID: '{req.case_id}'. Case not found.",
+            )
+        target_case_id = req.case_id
+    else:
         cases = case_manager.list_cases()
         if cases:
             target_case_id = cases[0].case_id
@@ -941,14 +970,6 @@ def launch_recovery_scan(
                 examiner=current_user.get("display_name", "Forensic Operator"),
             )
             target_case_id = adhoc_case.case_id
-    else:
-        c = case_manager.get_case(req.case_id)
-        if not c:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid case ID: '{req.case_id}'. Case not found.",
-            )
-        target_case_id = req.case_id
 
     # 2. Resolve method/engine identity
     engine_str = str(req.engine).lower().strip()
@@ -1421,7 +1442,15 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
         )
 
     # 3. Resolve Case Context
-    if not req.case_id:
+    if req.case_id:
+        c = case_manager.get_case(req.case_id)
+        if not c:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid case ID: '{req.case_id}'. Case not found.",
+            )
+        target_case_id = req.case_id
+    else:
         cases = case_manager.list_cases()
         if cases:
             target_case_id = cases[0].case_id
@@ -1432,14 +1461,6 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
                 examiner=current_user.get("display_name", "Forensic Operator"),
             )
             target_case_id = adhoc_case.case_id
-    else:
-        c = case_manager.get_case(req.case_id)
-        if not c:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid case ID: '{req.case_id}'. Case not found.",
-            )
-        target_case_id = req.case_id
 
     # 4. Pre-Execution Revalidation (TOCTOU guard for physical/device targets)
     if "PhysicalDrive" in req.target_path or req.target_path.startswith("\\\\.\\"):
