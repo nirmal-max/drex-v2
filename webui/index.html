@@ -13,7 +13,7 @@
 </head>
 <body>
   <div class="app-shell">
-    <!-- Collapsible Workstation Sidebar -->
+    <!-- Workstation Sidebar -->
     <aside class="sidebar" id="sidebar" aria-label="Workstation Navigation">
       <div class="brand">
         <div class="brand-mark">D</div>
@@ -23,55 +23,59 @@
         </div>
       </div>
 
-      <!-- Navigation Cluster -->
-      <nav class="nav" id="mainNav" aria-label="25-View Primary Navigation">
-        <div class="nav-section-label">OVERVIEW & STORY</div>
-        <button class="nav-item active" data-view="overview">✦ <span>Showcase & Story</span></button>
-        <button class="nav-item" data-view="judge_demo">⚡ <span>Judge Demo Flow</span></button>
-        <button class="nav-item" data-view="methods">☷ <span>25 Method Matrix</span></button>
+      <!-- Navigation Cluster (6 Investigator-First Sections) -->
+      <nav class="nav" id="mainNav" aria-label="Workstation Primary Navigation">
+        <!-- 1. WORKSPACE -->
+        <div class="nav-section-label">WORKSPACE</div>
+        <button class="nav-item active" data-view="overview" title="Forensic Workstation Overview">✦ <span>Overview</span></button>
+        <button class="nav-item" data-view="cases" title="Forensic Cases & Timeline">▣ <span>Cases & Timeline</span></button>
+        <button class="nav-item" data-view="vault" title="Immutable Evidence Vault">▤ <span>Evidence Vault</span></button>
 
-        <div class="nav-section-label">CASE & EVIDENCE CORE</div>
-        <button class="nav-item" data-view="cases">▣ <span>Cases & Timeline</span></button>
-        <button class="nav-item" data-view="vault">▣ <span>Evidence Vault</span></button>
-        <button class="nav-item" data-view="audit">▤ <span>Audit Chain</span></button>
-        <button class="nav-item" data-view="certificates">✓ <span>Certificates</span></button>
+        <!-- 2. INVESTIGATE -->
+        <div class="nav-section-label">INVESTIGATE</div>
+        <button class="nav-item" data-view="recovery" title="Forensic Filesystem & Inode Recovery">⌕ <span>Forensic Recovery</span></button>
+        <button class="nav-item" data-view="carving" title="Raw Sector Magic-Byte Carving">◈ <span>Raw File Carving</span></button>
+        <button class="nav-item" data-view="fragments" title="Non-Contiguous Fragment Reconstruction">☲ <span>Fragment Recovery</span></button>
+        <button class="nav-item" data-view="damaged_media" title="Damaged Media & Bad Sector Mapfiles">◬ <span>Damaged Media</span></button>
+        <button class="nav-item" data-view="hex_inspector" title="Live Hex & Byte Stream Inspector">▤ <span>Hex Inspector</span></button>
+        <button class="nav-item" data-view="residue_analyzer" title="Filesystem Residue & Slack Space Scrubber">▦ <span>Residue Analysis</span></button>
 
-        <div class="nav-section-label">FORENSIC RECOVERY</div>
-        <button class="nav-item" data-view="recovery">⌕ <span>Forensic Recovery</span></button>
-        <button class="nav-item" data-view="carving">◈ <span>Raw File Carving</span></button>
-        <button class="nav-item" data-view="fragments">☲ <span>Fragment Recovery</span></button>
-        <button class="nav-item" data-view="damaged_media">◬ <span>Damaged Media</span></button>
-        <button class="nav-item" data-view="hex_inspector">▤ <span>Hex Inspector</span></button>
+        <!-- 3. SANITIZE -->
+        <div class="nav-section-label">SANITIZE</div>
+        <button class="nav-item" data-view="sanitization_planner" title="NIST SP 800-88 Sanitization Planner">◇ <span>Sanitization Planner</span></button>
+        <button class="nav-item" data-view="drive_eraser" title="Privileged Physical Drive Eraser">⨂ <span>Drive Eraser</span></button>
+        <button class="nav-item" data-view="file_eraser" title="File & Folder CSPRNG Shredder">⨁ <span>File & Folder Eraser</span></button>
 
-        <div class="nav-section-label">SANITIZATION & ERASURE</div>
-        <button class="nav-item" data-view="sanitization_planner">◇ <span>Sanitization Planner</span></button>
-        <button class="nav-item" data-view="drive_eraser">⨂ <span>Drive Eraser</span></button>
-        <button class="nav-item" data-view="file_eraser">⨁ <span>File & Folder Eraser</span></button>
-        <button class="nav-item" data-view="residue_analyzer">▦ <span>Residue Analyzer</span></button>
+        <!-- 4. VERIFY -->
+        <div class="nav-section-label">VERIFY</div>
+        <button class="nav-item" data-view="verifier" title="Schema 2.0 Independent Verifier">✓ <span>Independent Verifier</span></button>
+        <button class="nav-item" data-view="validation_lab" title="Ground Truth Validation Lab">◌ <span>Validation Lab</span></button>
+        <button class="nav-item" data-view="verification" title="Entropy Verification & 64-Sector Grid">◉ <span>Verification & Entropy</span></button>
 
-        <div class="nav-section-label">ASSURANCE & TRUST</div>
-        <button class="nav-item" data-view="verifier">✓ <span>Independent Verifier</span></button>
-        <button class="nav-item" data-view="verification">◉ <span>Verification & Entropy</span></button>
-        <button class="nav-item" data-view="validation_lab">◌ <span>Validation Lab</span></button>
-        <button class="nav-item" data-view="performance_lab">◷ <span>Performance Lab</span></button>
-        <button class="nav-item" data-view="reports">▤ <span>Forensic Reports</span></button>
+        <!-- 5. REPORT -->
+        <div class="nav-section-label">REPORT</div>
+        <button class="nav-item" data-view="audit" title="SHA-256 Hash-Chained Audit Ledger">▤ <span>Audit Chain</span></button>
+        <button class="nav-item" data-view="certificates" title="Tamper-Evident Forensic Certificates">📜 <span>Certificates</span></button>
+        <button class="nav-item" data-view="reports" title="Case Chain-of-Custody Dossier">📋 <span>Forensic Reports</span></button>
 
-        <div class="nav-section-label">INFRASTRUCTURE & SYSTEM</div>
-        <button class="nav-item" data-view="device_intelligence">◉ <span>Device Intelligence</span></button>
-        <button class="nav-item" data-view="device_manager">⛃ <span>Device Manager</span></button>
-        <button class="nav-item" data-view="backend_manager">⚙ <span>Backend Manager</span></button>
-        <button class="nav-item" data-view="diagnostics">◒ <span>System Diagnostics</span></button>
-        <button class="nav-item" data-view="settings">⚙ <span>Workstation Settings</span></button>
+        <!-- 6. SYSTEM -->
+        <div class="nav-section-label">SYSTEM</div>
+        <button class="nav-item" data-view="device_intelligence" title="Device Capability & IOCTL Qualification">◉ <span>Device Intelligence</span></button>
+        <button class="nav-item" data-view="device_manager" title="Physical Storage Device Manager">⛃ <span>Device Manager</span></button>
+        <button class="nav-item" data-view="backend_manager" title="Native Forensic Backend Registry">⚙ <span>Backend Manager</span></button>
+        <button class="nav-item" data-view="diagnostics" title="System Elevation & Diagnostics">◒ <span>System Diagnostics</span></button>
+        <button class="nav-item" data-view="performance_lab" title="Throughput & Benchmark Lab">◷ <span>Performance Lab</span></button>
+        <button class="nav-item" data-view="settings" title="Workstation Settings & Backup">⚙ <span>Workstation Settings</span></button>
+        <button class="nav-item" data-view="methods" title="25 Canonical Method Matrix">☷ <span>25 Method Matrix</span></button>
+        <button class="nav-item" data-view="judge_demo" title="Judge Evaluation Demonstration Flow">🎯 <span>Judge Demo Flow</span></button>
       </nav>
 
       <!-- Sidebar Bottom Controls -->
       <div class="sidebar-bottom">
-        <div class="demo-title">EVALUATION ACTIONS</div>
-        <button class="action-btn judge-flow-btn" id="runJudgeProofBtn">✦ Run Judge Proof Loop</button>
         <div class="system-status">
-          <span><i class="dot good"></i> Cryptographic Tripwires</span>
-          <span><i class="dot good"></i> Dynamic OS Disk Lock</span>
-          <span><i class="dot good"></i> SHA-256 Hash Chain</span>
+          <span><i class="dot good"></i> Cryptographic Tripwires: Active</span>
+          <span><i class="dot good"></i> Dynamic OS Disk Lock: Active</span>
+          <span><i class="dot good"></i> SHA-256 Hash Chain: Sealed</span>
         </div>
       </div>
     </aside>
@@ -84,8 +88,11 @@
           <div class="breadcrumbs">
             <span>DREX Workstation</span>
             <b>/</b>
-            <span id="activeViewName">Showcase & Story</span>
-            <em id="activeCasePill">Active Case: Initializing...</em>
+            <span id="activeViewName">Overview</span>
+          </div>
+          <div class="case-switcher-bar">
+            <span class="active-case-tag" id="activeCasePill">Active Case: Initializing...</span>
+            <button class="case-switch-btn" id="switchCaseBtn" onclick="openCaseSwitcherModal()" title="Switch Active Case">Switch Case</button>
           </div>
         </div>
 
@@ -94,12 +101,12 @@
           <div class="persona-selector">
             <label for="personaSelect" class="sr-only">Forensic Persona</label>
             <select id="personaSelect" title="Switch RBAC Persona">
-              <option value="JUDGE_DEMO">✦ Judge Evaluation Persona</option>
-              <option value="ADMIN">🔒 Chief Administrator</option>
-              <option value="FORENSIC_ANALYST">⌕ Senior Forensic Analyst</option>
+              <option value="FORENSIC_ANALYST" selected>⌕ Senior Forensic Analyst</option>
               <option value="INVESTIGATOR">▣ Lead Case Investigator</option>
+              <option value="ADMIN">🔒 Chief Administrator</option>
               <option value="OPERATOR">◇ Sanitization Technician</option>
               <option value="AUDITOR">▤ Independent Auditor</option>
+              <option value="JUDGE_DEMO">🎯 Judge Evaluation Persona</option>
             </select>
           </div>
 
@@ -116,15 +123,26 @@
 
   <!-- Mobile Bottom Navigation Bar -->
   <nav class="mobile-nav" id="mobileNav" aria-label="Mobile Navigation">
-    <button class="mob-item active" data-view="overview"><span>✦</span><small>Story</small></button>
+    <button class="mob-item active" data-view="overview"><span>✦</span><small>Overview</small></button>
     <button class="mob-item" data-view="cases"><span>▣</span><small>Cases</small></button>
     <button class="mob-item" data-view="recovery"><span>⌕</span><small>Recovery</small></button>
-    <button class="mob-item" data-view="drive_eraser"><span>◇</span><small>Sanitize</small></button>
+    <button class="mob-item" data-view="drive_eraser"><span>⨂</span><small>Sanitize</small></button>
     <button class="mob-item" data-view="audit"><span>▤</span><small>Audit</small></button>
     <button class="mob-item" data-view="verifier"><span>✓</span><small>Verify</small></button>
   </nav>
 
-  <!-- Modal Container for Destructive Confirmation & Verifier Upload -->
+  <!-- Reusable Details Drawer Overlay -->
+  <div class="drawer-overlay" id="drawerOverlay" style="display: none;" onclick="closeDetailsDrawer()">
+    <aside class="drawer-box" id="drawerBox" onclick="event.stopPropagation()">
+      <div class="drawer-header">
+        <h3 id="drawerTitle">Artifact Details</h3>
+        <button class="drawer-close-btn" onclick="closeDetailsDrawer()">&times;</button>
+      </div>
+      <div class="drawer-body" id="drawerBody"></div>
+    </aside>
+  </div>
+
+  <!-- Modal Container for Destructive Confirmation, Case Switcher, & Verifier Upload -->
   <div class="modal-overlay" id="modalOverlay" style="display: none;">
     <div class="modal-box" id="modalBox"></div>
   </div>
