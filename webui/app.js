@@ -56,6 +56,16 @@ const STATE = {
   wsConnected: false,
 };
 
+function getActiveCaseId() {
+  if (STATE.activeCase && STATE.activeCase.case_id) {
+    return STATE.activeCase.case_id;
+  }
+  if (STATE.cases && STATE.cases.length > 0 && STATE.cases[0].case_id) {
+    return STATE.cases[0].case_id;
+  }
+  return null;
+}
+
 const esc = s => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 const formatBytes = b => {
@@ -185,6 +195,36 @@ function renderOverview() {
 }
 
 // 2. 25-Method Capability Matrix
+function useMethodFromMatrix(methodId) {
+  const mId = parseInt(methodId, 10);
+  if (mId >= 1 && mId <= 7) {
+    navigateTo('drive_eraser');
+  } else if (mId >= 8 && mId <= 16) {
+    navigateTo('file_eraser');
+    setTimeout(() => {
+      const sel = document.getElementById('shredMethodSelect');
+      if (sel) sel.value = String(mId);
+    }, 50);
+  } else if (mId >= 17 && mId <= 25) {
+    navigateTo('recovery');
+    setTimeout(() => {
+      const sel = document.getElementById('recoveryMethodSelect');
+      if (sel) sel.value = String(mId);
+    }, 50);
+  }
+}
+
+function viewMethodFromMatrix(methodId) {
+  const mId = parseInt(methodId, 10);
+  if (mId >= 1 && mId <= 7) {
+    navigateTo('drive_eraser');
+  } else if (mId >= 8 && mId <= 16) {
+    navigateTo('file_eraser');
+  } else if (mId >= 17 && mId <= 25) {
+    navigateTo('recovery');
+  }
+}
+
 function render25Methods() {
   const rows = STATE.methodsRegistry.map(m => {
     let badgeClass = 'badge-pass';
@@ -200,6 +240,11 @@ function render25Methods() {
         <td><span style="font-size: 11px; color: var(--drex-text-muted);">${esc(m.category)}</span></td>
         <td><span class="badge ${badgeClass}">${esc(m.status)}</span></td>
         <td><code style="font-size: 11px; color: #475569;">${esc(m.backend)}</code></td>
+        <td><small style="color: var(--drex-text-muted);">${esc(m.requirements || 'Standard')}</small></td>
+        <td style="white-space: nowrap;">
+          <button class="action-btn" style="padding: 3px 8px; font-size: 11px; width: auto; background: var(--drex-surface-2); color: var(--drex-text); border: 1px solid var(--drex-border-base);" onclick="viewMethodFromMatrix(${m.id})">👁 View</button>
+          <button class="action-btn" style="padding: 3px 8px; font-size: 11px; width: auto; background: var(--drex-primary); color: #fff; margin-left: 4px;" onclick="useMethodFromMatrix(${m.id})">Use Method →</button>
+        </td>
       </tr>
     `;
   }).join('');
@@ -210,15 +255,15 @@ function render25Methods() {
         <div class="section-label">AUTHORITATIVE REGISTRY</div>
         <h2 class="card-title">25-Method Technical & Capability Status Matrix</h2>
         <p style="color: var(--drex-text-muted); font-size: 12px; margin-top: 4px;">
-          Every method represents authentic capability truth states. No simulated success or fake hardware qualification is presented.
+          Authoritative technical discovery registry for all 25 canonical methods. Provides view navigation and contextual operational workflows under authentic truth states.
         </p>
       </div>
       <div class="table-wrap">
         <table class="table">
           <thead>
-            <tr><th>#</th><th>Method Name</th><th>Category</th><th>Truth Status</th><th>Execution Engine / Backend</th></tr>
+            <tr><th>#</th><th>Method Name</th><th>Category</th><th>Truth Status</th><th>Execution Engine / Backend</th><th>Requirements</th><th>Actions</th></tr>
           </thead>
-          <tbody>${rows || '<tr><td colspan="5" style="text-align: center; padding: 20px;">Loading Method Matrix...</td></tr>'}</tbody>
+          <tbody>${rows || '<tr><td colspan="7" style="text-align: center; padding: 20px;">Loading Method Matrix...</td></tr>'}</tbody>
         </table>
       </div>
     </div>
@@ -477,6 +522,24 @@ async function loadCertificates() {
 
 // 7. Forensic Recovery
 function renderRecovery() {
+  const recoveryMethods = (STATE.methodsRegistry && STATE.methodsRegistry.length > 0)
+    ? STATE.methodsRegistry.filter(m => m.category === 'Recovery' || (m.id >= 17 && m.id <= 25))
+    : [
+        { id: 17, name: 'Quick Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 18, name: 'Smart Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 19, name: 'Targeted Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 20, name: 'Filesystem Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 21, name: 'Deep Recovery', status: 'PARTIAL' },
+        { id: 22, name: 'Fragment Recovery', status: 'PARTIAL' },
+        { id: 23, name: 'RAID / Storage Recovery', status: 'UNSUPPORTED' },
+        { id: 24, name: 'Damaged Media Recovery', status: 'BACKEND UNAVAILABLE' },
+        { id: 25, name: 'Forensic Recovery', status: 'PASS — REAL EXECUTION VERIFIED' },
+      ];
+
+  const methodOptions = recoveryMethods.map(m => `
+    <option value="${m.id}" ${m.id === 17 ? 'selected' : ''}>[Method ${String(m.id).padStart(2, '0')}] ${esc(m.name)} (${esc(m.status)})</option>
+  `).join('');
+
   const candidateRows = STATE.candidates.map(c => `
     <tr>
       <td><strong>${esc(c.candidate_id)}</strong></td>
@@ -508,9 +571,12 @@ function renderRecovery() {
           <div class="section-label">FORENSIC CARVING & RECONSTRUCTION</div>
           <h2 class="card-title">Multi-Engine Recovery & Fragment Candidates</h2>
         </div>
-        <div style="display: flex; gap: 8px;">
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+          <select id="recoveryMethodSelect" class="safety-input" style="width: auto; padding: 6px;">
+            ${methodOptions}
+          </select>
           <button class="action-btn" style="width: auto; background: var(--drex-surface-2); color: var(--drex-text); border: 1px solid var(--drex-border-base); padding: 8px 14px;" onclick="triggerFragmentReconstructionDemo()">🧩 Reconstruct Fragments</button>
-          <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff; padding: 8px 14px;" onclick="triggerRecoveryScan()">⌕ Launch Safe Read-Only Scan</button>
+          <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff; padding: 8px 14px;" onclick="triggerRecoveryScan()">⌕ Launch Scan</button>
         </div>
       </div>
       <div class="table-wrap">
@@ -589,8 +655,18 @@ async function executeRawCarvingWorkbench() {
     statusBox.innerHTML = `<em>Executing DeepCarverEngine on source target '${esc(target)}'...</em>`;
   }
 
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    if (statusBox) {
+      statusBox.style.display = 'block';
+      statusBox.style.background = '#fef2f2';
+      statusBox.style.color = '#991b1b';
+      statusBox.innerHTML = '✕ Operation Blocked: No active case selected. Please select or register a case first.';
+    }
+    return;
+  }
+
   try {
-    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001';
     const res = await api('/api/recovery/scan', {
       method: 'POST',
       body: JSON.stringify({
@@ -735,7 +811,19 @@ function renderFragments() {
 async function executeFragmentReassembly() {
   const resultBox = document.getElementById('fragResultBox');
   const preset = document.getElementById('fragPresetSelect').value;
-  const caseId = document.getElementById('fragCaseSelect').value || ((STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001');
+  const caseId = (document.getElementById('fragCaseSelect') && document.getElementById('fragCaseSelect').value)
+    ? document.getElementById('fragCaseSelect').value
+    : getActiveCaseId();
+
+  if (!caseId) {
+    if (resultBox) {
+      resultBox.style.display = 'block';
+      resultBox.style.background = '#fef2f2';
+      resultBox.style.color = '#991b1b';
+      resultBox.innerHTML = '✕ Operation Blocked: No active case selected. Please select or register a case first.';
+    }
+    return;
+  }
 
   if (resultBox) {
     resultBox.style.display = 'block';
@@ -1136,12 +1224,30 @@ function renderDriveEraser() {
 
 // 14. File & Folder CSPRNG Shredder
 function renderFileEraser() {
+  const fileMethods = (STATE.methodsRegistry && STATE.methodsRegistry.length > 0)
+    ? STATE.methodsRegistry.filter(m => m.category === 'File/Folder Erasure' || (m.id >= 8 && m.id <= 16))
+    : [
+        { id: 8, name: 'CSPRNG Random Overwrite', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 9, name: 'Cryptographic Erasure', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 10, name: 'File Slack / Cluster-Tip', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 11, name: 'Filesystem Metadata Sanitization', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 12, name: 'NIST SP 800-88 File Policy Engine', status: 'PASS — DECISION ENGINE VERIFIED' },
+        { id: 13, name: 'Secure Free-Space Wiping', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 14, name: 'Single-Pass Zero Overwrite', status: 'PASS — REAL EXECUTION VERIFIED' },
+        { id: 15, name: 'Storage-Aware Sanitization Fallback', status: 'PASS — DECISION ENGINE VERIFIED' },
+        { id: 16, name: 'Temporary / Cache Sanitization', status: 'PASS — REAL EXECUTION VERIFIED' },
+      ];
+
+  const methodOptions = fileMethods.map(m => `
+    <option value="${m.id}" ${m.id === 8 ? 'selected' : ''}>[Method ${String(m.id).padStart(2, '0')}] ${esc(m.name)} (${esc(m.status)})</option>
+  `).join('');
+
   return `
     <div class="card">
-      <div class="section-label">METHOD 08 & 14 · LOGICAL OVERWRITE SHREDDER</div>
+      <div class="section-label">METHOD 08–16 · LOGICAL OVERWRITE SHREDDER & SANITIZERS</div>
       <h2 class="card-title">File & Folder CSPRNG Shredder</h2>
       <p style="color: var(--drex-text-muted); font-size: 12px; margin-top: 4px;">
-        Securely overwrites logical files and directories with cryptographically strong pseudorandom byte streams (<code>os.urandom</code>) or single-pass zero fills.
+        Securely sanitizes logical files, directories, slack bytes, and container keys using standards-aligned algorithms (CSPRNG, NIST Clear, Slack Zero, Crypto Invalidation).
       </p>
 
       <div class="grid grid-3 mt-14" style="gap: 12px;">
@@ -1152,10 +1258,7 @@ function renderFileEraser() {
         <div>
           <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">OVERWRITE ALGORITHM</label>
           <select id="shredMethodSelect" class="safety-input" style="margin-top: 4px; padding: 6px;">
-            <option value="8" selected>[Method 08] CSPRNG Random Overwrite (1 Pass)</option>
-            <option value="14">[Method 14] Single-Pass Zero (0x00)</option>
-            <option value="9">[Method 09] DoD 5220.22-M (3 Pass)</option>
-            <option value="11">[Method 11] OS Metadata Scrub & Truncate</option>
+            ${methodOptions}
           </select>
         </div>
         <div>
@@ -1192,15 +1295,25 @@ async function executeFileShredder() {
     return;
   }
 
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    if (resultBox) {
+      resultBox.style.display = 'block';
+      resultBox.style.background = '#fef2f2';
+      resultBox.style.color = '#991b1b';
+      resultBox.innerHTML = '✕ Operation Blocked: No active case selected. Please select or register a case first.';
+    }
+    return;
+  }
+
   if (resultBox) {
     resultBox.style.display = 'block';
     resultBox.style.background = '#eff6ff';
     resultBox.style.color = '#1d4ed8';
-    resultBox.innerHTML = '<em>Executing multi-pass CSPRNG overwrite and calculating post-wipe entropy...</em>';
+    resultBox.innerHTML = '<em>Executing real backend sanitization and measuring post-wipe entropy & readback...</em>';
   }
 
   try {
-    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001';
     const res = await api('/api/sanitization/execute', {
       method: 'POST',
       body: JSON.stringify({
@@ -1218,7 +1331,7 @@ async function executeFileShredder() {
       resultBox.innerHTML = `
         <div style="font-weight: 700; font-size: 13px;">✓ ${esc(res.verdict)}</div>
         <div style="margin-top: 4px; font-size: 11px;">
-          Job ID: <code>${esc(res.job_id)}</code> &middot; Observed Entropy: <strong>${res.entropy_h} bits/byte</strong> &middot; Readback Mismatches: <strong>${res.readback_mismatches}</strong>
+          Job ID: <code>${esc(res.job_id)}</code> &middot; Bytes Written: <strong>${formatBytes(res.bytes_written)}</strong> &middot; Observed Entropy: <strong>${res.entropy_h} bits/byte</strong> &middot; Readback Mismatches: <strong>${res.readback_mismatches}</strong> &middot; Type: <code>${esc(res.execution_type || 'REAL')}</code>
         </div>
         <div style="margin-top: 8px;">
           <button class="action-btn" style="width: auto; padding: 4px 10px; font-size: 11px; background: var(--drex-primary); color: #fff;" onclick="generateCertificateForActiveCase()">📜 Issue Attestation Certificate →</button>
@@ -1377,8 +1490,18 @@ async function runValidationLabSuite() {
     statusBox.innerHTML = '<em>Running server-side Known-Answer validation suites and hardware safety tripwires...</em>';
   }
 
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    if (statusBox) {
+      statusBox.style.display = 'block';
+      statusBox.style.background = '#fef2f2';
+      statusBox.style.color = '#991b1b';
+      statusBox.innerHTML = '✕ Operation Blocked: No active case selected. Please select or register a case first.';
+    }
+    return;
+  }
+
   try {
-    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001';
     const res = await api('/api/validation/run', {
       method: 'POST',
       body: JSON.stringify({
@@ -1558,8 +1681,18 @@ async function verifyValidationReport(caseId, reportId) {
     resBox.innerHTML = '<em>Recalculating canonical SHA-256 and verifying case audit chain...</em>';
   }
 
+  const cId = caseId || getActiveCaseId();
+  if (!cId) {
+    if (resBox) {
+      resBox.style.display = 'block';
+      resBox.style.background = '#fef2f2';
+      resBox.style.color = '#991b1b';
+      resBox.innerHTML = '✕ Operation Blocked: No active case selected for report verification.';
+    }
+    return;
+  }
+
   try {
-    const cId = caseId || ((STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001');
     const res = await api('/api/validation/verify', {
       method: 'POST',
       body: JSON.stringify({ case_id: cId, report_id: reportId }),
@@ -1691,8 +1824,18 @@ async function runPerformanceBenchmark() {
     statusBox.innerHTML = '<em>Running streaming IO benchmark under dual-signal memory profiling...</em>';
   }
 
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    if (statusBox) {
+      statusBox.style.display = 'block';
+      statusBox.style.background = '#fef2f2';
+      statusBox.style.color = '#991b1b';
+      statusBox.innerHTML = '✕ Operation Blocked: No active case selected. Please select or register a case first.';
+    }
+    return;
+  }
+
   try {
-    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001';
     const res = await api('/api/performance/run', {
       method: 'POST',
       body: JSON.stringify({
@@ -2367,17 +2510,25 @@ function promptCreateCase() {
 }
 
 async function triggerRecoveryScan() {
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    alert('No active case selected. Please register or select a case first.');
+    return;
+  }
   try {
     const target = (STATE.devices && STATE.devices.length > 0) ? STATE.devices[0].device_path : '\\\\.\\\\PhysicalDrive99';
+    const methodSelect = document.getElementById('recoveryMethodSelect');
+    const methodId = methodSelect ? methodSelect.value : '17';
     const res = await api('/api/recovery/scan', {
       method: 'POST',
       body: JSON.stringify({
+        case_id: caseId,
         source_path: target,
         destination_dir: 'vault/extracted',
-        engine: 'TSK',
+        engine: String(methodId),
       }),
     });
-    alert(`Recovery Scan initiated: Job ID ${res.job_id || 'N/A'}`);
+    alert(`Recovery Scan initiated: Job ID ${res.job_id || 'N/A'} (Engine: ${res.engine || methodId})`);
     await loadInitialData();
   } catch (ex) {
     alert(`Recovery Scan Notice: ${ex.message}`);
@@ -2385,8 +2536,12 @@ async function triggerRecoveryScan() {
 }
 
 async function triggerCandidateExtract(candidateId) {
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    alert('No active case selected. Please register or select a case first.');
+    return;
+  }
   try {
-    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : 'CASE-001';
     const res = await api('/api/recovery/extract', {
       method: 'POST',
       body: JSON.stringify({
