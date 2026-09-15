@@ -46,7 +46,13 @@ const STATE = {
   activeCase: null,
   cases: [],
   devices: [],
-  candidates: [],
+  // Workflow-scoped candidate storage to prevent cross-workflow contamination
+  recoveryCandidates: [],
+  carvingCandidates: [],
+  fragmentCandidates: [],
+  candidates: [], // alias
+  // Active durable jobs map: jobId -> JobSnapshot
+  activeJobs: {},
   auditEvents: [],
   certificates: [],
   evidenceItems: [],
@@ -60,21 +66,46 @@ const STATE = {
   selectedRecoveryMethod: 17,
   lastPlannedTarget: null,
   pendingDestructiveTarget: null,
+  // Execution context
+  workflowContext: {
+    activeWorkflowId: 'overview',
+    activeJobId: null,
+    activeCaseId: null,
+  },
 };
 
 function getActiveCaseId() {
   if (STATE.activeCase && STATE.activeCase.case_id) {
     return STATE.activeCase.case_id;
   }
-  if (STATE.cases && STATE.cases.length > 0 && STATE.cases[0].case_id) {
-    return STATE.cases[0].case_id;
-  }
-  return null;
+  return null; // Strict isolation: NEVER silently fall back to cases[0]
 }
 
-function showNotification({ severity = 'INFO', title = 'NOTIFICATION', message = '', jobId = null, caseId = null, methodId = null, target = null, workflowId = null, durationMs = 5000 }) {
+// Dedup cache to suppress identical rapid-fire notification toasts
+const _recentNotifs = new Map();
+
+function showNotification({
+  severity = 'INFO',
+  title = 'NOTIFICATION',
+  message = '',
+  jobId = null,
+  caseId = null,
+  methodId = null,
+  target = null,
+  workflowId = null,
+  scope = null, // 'GLOBAL' | 'CASE' | 'WORKFLOW' | 'JOB'
+  durationMs = 5000,
+}) {
+  const now = Date.now();
+  const dedupKey = `${severity}|${title}|${message}|${workflowId}|${caseId}`;
+  if (_recentNotifs.has(dedupKey) && (now - _recentNotifs.get(dedupKey)) < 3000) {
+    return; // Suppress duplicate spam
+  }
+  _recentNotifs.set(dedupKey, now);
+
   if (!STATE.notifications) STATE.notifications = [];
-  STATE.notifications.unshift({
+  const notifRecord = {
+    id: `NOTIF-${now}-${Math.random().toString(36).substr(2, 6)}`,
     timestamp: new Date().toISOString(),
     severity,
     title,
@@ -84,13 +115,21 @@ function showNotification({ severity = 'INFO', title = 'NOTIFICATION', message =
     methodId,
     target,
     workflowId,
-  });
+    scope: scope || (workflowId ? 'WORKFLOW' : (caseId ? 'CASE' : 'GLOBAL')),
+  };
+  STATE.notifications.unshift(notifRecord);
 
-  // Stale Job Isolation:
-  // If an async notification belongs to an explicit workflow that is no longer active,
-  // do not show it as a floating toast on an unrelated workflow.
-  if (workflowId && STATE.currentTab && STATE.currentTab !== workflowId) {
-    console.info(`[DREX Job Isolation] Notice for workflow '${workflowId}' stored in history while on '${STATE.currentTab}'`);
+  // Workflow & Case Isolation Filter:
+  // 1. If workflowId is specified (or scope is WORKFLOW), only show floating toast if currently on that view!
+  if (workflowId && STATE.currentView && STATE.currentView !== workflowId) {
+    console.info(`[DREX Isolation] Notice for workflow '${workflowId}' recorded in history while on '${STATE.currentView}'`);
+    return;
+  }
+
+  // 2. If caseId is specified, only show floating toast if currently on that case!
+  const activeCaseId = getActiveCaseId();
+  if (caseId && activeCaseId && activeCaseId !== caseId) {
+    console.info(`[DREX Isolation] Notice for case '${caseId}' recorded in history while active case is '${activeCaseId}'`);
     return;
   }
 
@@ -111,16 +150,20 @@ function showNotification({ severity = 'INFO', title = 'NOTIFICATION', message =
   const color = sevColors[severity] || sevColors.INFO;
 
   const item = document.createElement('div');
+  item.className = 'drex-toast-item';
+  item.dataset.workflowId = workflowId || '';
+  item.dataset.caseId = caseId || '';
+  item.dataset.scope = notifRecord.scope;
   item.style.cssText = `pointer-events: auto; background: ${color.bg}; border: 1px solid ${color.border}; color: ${color.text}; padding: 12px 14px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); font-size: 12px; transition: all 0.3s ease;`;
   item.innerHTML = `
     <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
       <strong style="font-size: 12px; letter-spacing: 0.04em;">${color.icon} ${esc(title)}</strong>
-      <button style="background: none; border: none; font-size: 14px; line-height: 1; color: inherit; cursor: pointer; padding: 0;" onclick="this.closest('div').parentElement.remove()">&times;</button>
+      <button style="background: none; border: none; font-size: 14px; line-height: 1; color: inherit; cursor: pointer; padding: 0;" onclick="this.closest('.drex-toast-item').remove()">&times;</button>
     </div>
     <div style="margin-top: 4px; line-height: 1.4; word-break: break-word;">${esc(message)}</div>
     ${(jobId || caseId || methodId || target) ? `
       <div style="margin-top: 6px; font-size: 10px; opacity: 0.85; font-family: var(--drex-font-mono);">
-        ${caseId ? `Case: ${esc(caseId)} ` : ''}${methodId ? `· Method: M${String(methodId).padStart(2, '0')} ` : ''}${target ? `· Target: ${esc(target)}` : ''}
+        ${caseId ? `Case: ${esc(caseId)} ` : ''}${workflowId ? `· Wf: ${esc(workflowId)} ` : ''}${methodId ? `· Method: M${String(methodId).padStart(2, '0')} ` : ''}${target ? `· Target: ${esc(target)}` : ''}
       </div>
     ` : ''}
   `;
@@ -418,9 +461,19 @@ function renderVault() {
 async function loadVaultEvidence() {
   const container = document.getElementById('vaultTableContainer');
   if (!container) return;
-  const caseId = STATE.activeCase ? STATE.activeCase.case_id : '';
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    container.innerHTML = `
+      <div style="padding: 30px; text-align: center; background: var(--drex-bg-surface-subtle); border-radius: var(--drex-radius-md); border: 1px dashed var(--drex-border-base);">
+        <div style="font-size: 24px; margin-bottom: 8px;">▣</div>
+        <p style="font-weight: 600;">No Active Case Selected</p>
+        <p style="font-size: 12px; color: var(--drex-text-muted); margin-top: 4px;">Select or register an operational case to view its evidence vault.</p>
+      </div>
+    `;
+    return;
+  }
   try {
-    const items = await api(`/api/evidence${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ''}`);
+    const items = await api(`/api/evidence?case_id=${encodeURIComponent(caseId)}`);
     STATE.evidenceItems = items || [];
     if (STATE.evidenceItems.length === 0) {
       container.innerHTML = `
@@ -472,22 +525,6 @@ async function loadVaultEvidence() {
 
 // 5. Audit Chain
 function renderAudit() {
-  const events = STATE.auditEvents.map(e => `
-    <div class="timeline-event">
-      <div class="timeline-dot"></div>
-      <div class="timeline-content">
-        <div style="display: flex; justify-content: space-between;">
-          <strong>Seq #${String(e.sequence).padStart(3, '0')} · ${esc(e.event_type)}</strong>
-          <span class="timeline-meta">${esc(e.timestamp_utc)}</span>
-        </div>
-        <div style="font-size: 12px; margin-top: 2px;">${esc(e.payload_summary)}</div>
-        <div style="font-family: var(--drex-font-mono); font-size: 10px; color: var(--drex-text-muted); margin-top: 4px;">
-          SHA256: ${esc((e.current_hash || '').slice(0, 32))}... (Prev: ${esc((e.previous_hash || '').slice(0, 16))}...)
-        </div>
-      </div>
-    </div>
-  `).join('');
-
   return `
     <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
@@ -495,11 +532,51 @@ function renderAudit() {
           <div class="section-label">CRYPTOGRAPHIC INTEGRITY</div>
           <h2 class="card-title">SHA-256 Hash-Chained Audit Ledger</h2>
         </div>
-        <button class="action-btn" style="width: auto; background: var(--drex-status-pass); color: #fff; padding: 8px 14px;" onclick="verifyAuditChain()">✓ Verify Chain Integrity</button>
+        <div style="display: flex; gap: 8px;">
+          <button class="action-btn" style="width: auto; background: var(--drex-bg-surface-subtle); color: var(--drex-text-main); border: 1px solid var(--drex-border-base); padding: 8px 14px;" onclick="loadAuditLedger()">↻ Refresh</button>
+          <button class="action-btn" style="width: auto; background: var(--drex-status-pass); color: #fff; padding: 8px 14px;" onclick="verifyAuditChain()">✓ Verify Chain Integrity</button>
+        </div>
       </div>
-      <div class="timeline">${events || '<p style="padding: 20px;">No audit events loaded.</p>'}</div>
+      <div class="timeline" id="auditTimelineContainer">
+        <div style="padding: 20px; color: var(--drex-text-muted);">Loading audit events for active case...</div>
+      </div>
     </div>
   `;
+}
+
+async function loadAuditLedger() {
+  const container = document.getElementById('auditTimelineContainer');
+  if (!container) return;
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    container.innerHTML = '<p style="padding: 20px; color: var(--drex-text-muted);">No active case selected. Select an operational case to view its cryptographic audit ledger.</p>';
+    return;
+  }
+  try {
+    const events = await api(`/api/audit/ledger?case_id=${encodeURIComponent(caseId)}`);
+    STATE.auditEvents = events || [];
+    if (STATE.auditEvents.length === 0) {
+      container.innerHTML = '<p style="padding: 20px; color: var(--drex-text-muted);">No audit events recorded for this case yet.</p>';
+      return;
+    }
+    container.innerHTML = STATE.auditEvents.map(e => `
+      <div class="timeline-event">
+        <div class="timeline-dot"></div>
+        <div class="timeline-content">
+          <div style="display: flex; justify-content: space-between;">
+            <strong>Seq #${String(e.sequence).padStart(3, '0')} · ${esc(e.event_type)}</strong>
+            <span class="timeline-meta">${esc(e.timestamp_utc)}</span>
+          </div>
+          <div style="font-size: 12px; margin-top: 2px;">${esc(e.payload_summary)}</div>
+          <div style="font-family: var(--drex-font-mono); font-size: 10px; color: var(--drex-text-muted); margin-top: 4px;">
+            SHA256: ${esc((e.current_hash || '').slice(0, 32))}... (Prev: ${esc((e.previous_hash || '').slice(0, 16))}...)
+          </div>
+        </div>
+      </div>
+    `).join('');
+  } catch (ex) {
+    container.innerHTML = `<p style="padding: 20px; color: var(--drex-status-fail);">Failed to load audit ledger: ${esc(ex.message)}</p>`;
+  }
 }
 
 // 6. Forensic Certificates
@@ -540,9 +617,19 @@ function renderCertificates() {
 async function loadCertificates() {
   const container = document.getElementById('certificatesContainer');
   if (!container) return;
-  const caseId = STATE.activeCase ? STATE.activeCase.case_id : '';
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    container.innerHTML = `
+      <div style="padding: 32px; text-align: center; background: var(--drex-bg-surface-subtle); border-radius: var(--drex-radius-md); border: 1px dashed var(--drex-border-base);">
+        <div style="font-size: 24px; margin-bottom: 8px;">📜</div>
+        <p style="font-weight: 600; font-size: 14px;">No Active Case Selected</p>
+        <p style="font-size: 12px; color: var(--drex-text-muted); margin-top: 4px;">Select or register an operational case to view its attestation certificates.</p>
+      </div>
+    `;
+    return;
+  }
   try {
-    const certs = await api(`/api/certificates${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ''}`);
+    const certs = await api(`/api/certificates?case_id=${encodeURIComponent(caseId)}`);
     STATE.certificates = certs || [];
     if (STATE.certificates.length === 0) {
       container.innerHTML = `
@@ -621,7 +708,11 @@ function renderRecovery() {
     <option value="${m.id}" ${m.id === 17 ? 'selected' : ''}>[Method ${String(m.id).padStart(2, '0')}] ${esc(m.name)} (${esc(m.status)})</option>
   `).join('');
 
-  const candidateRows = STATE.candidates.map(c => `
+  const cands = (STATE.recoveryCandidates && STATE.recoveryCandidates.length > 0)
+    ? STATE.recoveryCandidates
+    : (STATE.candidates || []);
+
+  const candidateRows = cands.map(c => `
     <tr>
       <td><strong>${esc(c.candidate_id)}</strong></td>
       <td>${esc(c.filename)}</td>
@@ -665,11 +756,64 @@ function renderRecovery() {
           <thead>
             <tr><th>Candidate</th><th>Filename</th><th>Format</th><th>Size</th><th>Evidence Confidence</th><th>State</th><th>Provenance</th><th>Structural Verdict</th><th>Vault Action</th></tr>
           </thead>
-          <tbody>${candidateRows || '<tr><td colspan="9" style="text-align:center; padding:20px;">No candidates extracted.</td></tr>'}</tbody>
+          <tbody id="recoveryCandidatesTbody">${candidateRows || '<tr><td colspan="9" style="text-align:center; padding:20px;">No candidates extracted.</td></tr>'}</tbody>
         </table>
       </div>
     </div>
   `;
+}
+
+async function loadRecoveryCandidates() {
+  const caseId = getActiveCaseId();
+  if (!caseId) {
+    STATE.recoveryCandidates = [];
+    STATE.candidates = [];
+    renderRecoveryTable();
+    return;
+  }
+  try {
+    const cands = await api(`/api/recovery/candidates?case_id=${encodeURIComponent(caseId)}`);
+    STATE.recoveryCandidates = cands || [];
+    STATE.candidates = STATE.recoveryCandidates;
+    renderRecoveryTable();
+  } catch (ex) {
+    console.error('Failed to load recovery candidates:', ex);
+  }
+}
+
+function renderRecoveryTable() {
+  const tbody = document.getElementById('recoveryCandidatesTbody');
+  if (!tbody) return;
+  const cands = (STATE.recoveryCandidates && STATE.recoveryCandidates.length > 0)
+    ? STATE.recoveryCandidates
+    : (STATE.candidates || []);
+  if (cands.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px;">No candidates extracted.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = cands.map(c => `
+    <tr>
+      <td><strong>${esc(c.candidate_id)}</strong></td>
+      <td>${esc(c.filename)}</td>
+      <td><span class="badge" style="background:#eaf3ff; color:#1769e0;">${esc(c.file_type)}</span></td>
+      <td>${formatBytes(c.size_bytes)}</td>
+      <td>
+        <span class="badge ${c.confidence_tier === 'HIGH' ? 'badge-pass' : (c.confidence_tier === 'MEDIUM' ? 'badge-warn' : 'badge-danger')}">
+          ${c.confidence_score.toFixed(3)} (${esc(c.confidence_tier)})
+        </span>
+      </td>
+      <td>
+        <span class="badge ${c.is_recovered ? 'badge-pass' : (c.validation_state === 'RECONSTRUCTED_CANDIDATE' ? 'badge-info' : 'badge-neutral')}" style="font-size: 10px;">
+          ${esc(c.validation_state || (c.is_recovered ? 'RECOVERED_ARTIFACT' : 'CANDIDATE'))}
+        </span>
+      </td>
+      <td><small style="color: var(--drex-text-muted);">${esc(c.provenance)}</small></td>
+      <td><span class="badge badge-pass">${esc(c.validation_verdict)}</span></td>
+      <td>
+        ${!c.is_recovered ? `<button class="action-btn" style="padding: 4px 8px; font-size: 11px; background: var(--drex-primary); color: #fff;" onclick="triggerCandidateExtract('${esc(c.candidate_id)}')">📥 Ingest to Vault</button>` : `<span style="color:#168a4a; font-weight:600; font-size:11px;">✓ Vault Ingested</span>`}
+      </td>
+    </tr>
+  `).join('');
 }
 
 // 8. Raw File Carving Workbench
@@ -744,6 +888,13 @@ async function executeRawCarvingWorkbench() {
       statusBox.style.color = '#991b1b';
       statusBox.innerHTML = '✕ Operation Blocked: No active case selected. Please select or register a case first.';
     }
+    showNotification({
+      severity: 'WARN',
+      title: 'CARVING BLOCKED',
+      message: 'No active operational case selected.',
+      workflowId: 'carving',
+      target: target,
+    });
     return;
   }
 
@@ -755,6 +906,7 @@ async function executeRawCarvingWorkbench() {
         source_path: target,
         destination_dir: 'vault/carved',
         engine: 'CARVER',
+        workflow_id: 'WF-CARVE-RAW',
         max_candidates: 25,
       }),
     });
@@ -765,8 +917,20 @@ async function executeRawCarvingWorkbench() {
       statusBox.innerHTML = `✓ Carve Job Dispatched: <strong>${esc(res.job_id || 'JOB-ACTIVE')}</strong> &middot; Target: <code>${esc(res.source)}</code>`;
     }
 
-    // Refresh candidates
-    STATE.candidates = await api('/api/recovery/candidates').catch(() => []);
+    showNotification({
+      severity: 'PASS',
+      title: 'RAW CARVING STARTED',
+      message: `Job ${res.job_id || 'ACTIVE'}: DeepCarverEngine started on ${target}`,
+      jobId: res.job_id,
+      caseId: caseId,
+      workflowId: 'carving',
+      methodId: 21,
+      target: target,
+    });
+
+    // Refresh candidates specifically for carving workflow
+    const cands = await api(`/api/recovery/candidates?case_id=${encodeURIComponent(caseId)}`).catch(() => []);
+    STATE.carvingCandidates = cands;
     renderCarvedCandidatesList();
   } catch (ex) {
     if (statusBox) {
@@ -774,13 +938,23 @@ async function executeRawCarvingWorkbench() {
       statusBox.style.color = '#991b1b';
       statusBox.innerHTML = `✕ Carving Failed: ${esc(ex.message)}`;
     }
+    showNotification({
+      severity: 'FAIL',
+      title: 'CARVING ERROR',
+      message: ex.message,
+      caseId: caseId,
+      workflowId: 'carving',
+      methodId: 21,
+      target: target,
+    });
   }
 }
 
 function renderCarvedCandidatesList() {
   const container = document.getElementById('carveCandidatesTable');
   if (!container) return;
-  if (!STATE.candidates || STATE.candidates.length === 0) {
+  const cands = (STATE.carvingCandidates && STATE.carvingCandidates.length > 0) ? STATE.carvingCandidates : [];
+  if (cands.length === 0) {
     container.innerHTML = '<p style="color: var(--drex-text-muted); font-size: 12px;">No candidates discovered in recent scan.</p>';
     return;
   }
@@ -801,19 +975,29 @@ function renderCarvedCandidatesList() {
           </tr>
         </thead>
         <tbody>
-          ${STATE.candidates.map(c => `
+          ${cands.map(c => `
             <tr>
               <td><code>${esc(c.candidate_id)}</code></td>
-              <td><strong>${esc(c.file_type)}</strong></td>
-              <td>${c.offset} (0x${(c.offset || 0).toString(16).toUpperCase()})</td>
+              <td><span class="badge" style="background:#eaf3ff; color:#1769e0; font-size:10px;">${esc(c.file_type)}</span></td>
+              <td><code>0x${Number(c.offset || 0).toString(16).toUpperCase()}</code></td>
               <td>${formatBytes(c.size_bytes)}</td>
-              <td><span class="badge ${c.confidence_tier === 'HIGH' ? 'badge-pass' : 'badge-warn'}">${c.confidence_score.toFixed(3)}</span></td>
-              <td style="font-family: var(--drex-font-mono); font-size: 10px;">
-                ${c.confidence_factors ? `${c.confidence_factors.header_signature || 0} / ${c.confidence_factors.footer_signature || 0} / ${c.confidence_factors.structural_integrity || 0} / ${c.confidence_factors.entropy_validation || 0} / ${c.confidence_factors.filesystem_alignment || 0}` : '0.25/0.25/0.20/0.15/0.15'}
-              </td>
-              <td><span class="badge ${c.is_recovered ? 'badge-pass' : 'badge-neutral'}" style="font-size: 10px;">${esc(c.validation_state)}</span></td>
               <td>
-                ${!c.is_recovered ? `<button class="action-btn" style="padding: 3px 8px; font-size: 10px; background: var(--drex-primary); color: #fff;" onclick="triggerCandidateExtract('${esc(c.candidate_id)}')">📥 Ingest to Vault</button>` : `<span style="color:#168a4a; font-weight:600; font-size:10px;">✓ Ingested</span>`}
+                <span class="badge ${c.confidence_tier === 'HIGH' ? 'badge-pass' : (c.confidence_tier === 'MEDIUM' ? 'badge-warn' : 'badge-danger')}">
+                  ${c.confidence_score.toFixed(3)} (${esc(c.confidence_tier)})
+                </span>
+              </td>
+              <td>
+                <small style="font-family: var(--drex-font-mono); color: var(--drex-text-muted);">
+                  ${c.confidence_factors ? Object.values(c.confidence_factors).map(v => typeof v === 'number' ? v.toFixed(2) : v).join(' / ') : 'N/A'}
+                </small>
+              </td>
+              <td>
+                <span class="badge ${c.is_recovered ? 'badge-pass' : 'badge-info'}" style="font-size: 10px;">
+                  ${esc(c.validation_state || 'CANDIDATE')}
+                </span>
+              </td>
+              <td>
+                ${!c.is_recovered ? `<button class="action-btn" style="padding: 3px 6px; font-size: 10px; background: var(--drex-primary); color: #fff;" onclick="triggerCandidateExtract('${esc(c.candidate_id)}')">📥 Ingest</button>` : `<span style="color:#168a4a; font-weight:600; font-size:10px;">✓ Ingested</span>`}
               </td>
             </tr>
           `).join('')}
@@ -969,6 +1153,15 @@ async function executeFragmentReassembly() {
         </div>
       `;
     }
+
+    showNotification({
+      severity: 'PASS',
+      title: 'FRAGMENT RECONSTRUCTED',
+      message: `Reconstructed ${res.file_type} (${res.total_size_bytes} bytes) with confidence ${res.reconstruction_confidence.toFixed(2)}`,
+      caseId: caseId,
+      workflowId: 'fragments',
+      methodId: 22,
+    });
   } catch (ex) {
     if (resultBox) {
       resultBox.style.background = '#fef2f2';
@@ -976,6 +1169,14 @@ async function executeFragmentReassembly() {
       resultBox.style.border = '1px solid #ef4444';
       resultBox.innerHTML = `✕ Reconstruction Error: ${esc(ex.message)}`;
     }
+    showNotification({
+      severity: 'FAIL',
+      title: 'FRAGMENT ERROR',
+      message: ex.message,
+      caseId: caseId,
+      workflowId: 'fragments',
+      methodId: 22,
+    });
   }
 }
 
@@ -1517,6 +1718,7 @@ async function executeFileShredder() {
       message: `Verdict: ${res.verdict} | Entropy: ${res.entropy_h} bits/byte | Bytes: ${res.bytes_written}`,
       jobId: res.job_id,
       caseId: caseId,
+      workflowId: 'file_eraser',
       methodId: methodId,
       target: target,
     });
@@ -1531,6 +1733,7 @@ async function executeFileShredder() {
       title: 'SHREDDING FAILED',
       message: ex.message,
       caseId: caseId,
+      workflowId: 'file_eraser',
       methodId: methodId,
       target: target,
     });
@@ -1819,7 +2022,7 @@ async function loadValidationReports() {
   if (!listEl) return;
 
   try {
-    const caseId = (STATE.cases && STATE.cases.length > 0) ? STATE.cases[0].case_id : '';
+    const caseId = getActiveCaseId();
     const query = caseId ? `?case_id=${encodeURIComponent(caseId)}` : '';
     const reports = await api(`/api/validation/reports${query}`);
 
@@ -2512,7 +2715,25 @@ async function triggerCaseRestore() {
 // ─── Controller & Navigation ──────────────────────────────────────────────────
 
 function navigateTo(viewId) {
+  const previousView = STATE.currentView;
   STATE.currentView = viewId;
+  if (STATE.workflowContext) {
+    STATE.workflowContext.activeWorkflowId = viewId;
+  }
+
+  // Stale Toast Cleanup on Navigation:
+  // Dismiss any floating toasts belonging to a different workflow so they do not linger across views
+  const container = document.getElementById('drexNotificationContainer');
+  if (container) {
+    Array.from(container.querySelectorAll('.drex-toast-item')).forEach(toast => {
+      const toastWf = toast.dataset.workflowId;
+      const toastScope = toast.dataset.scope;
+      if (toastWf && toastWf !== viewId && toastScope === 'WORKFLOW') {
+        toast.remove();
+      }
+    });
+  }
+
   const viewTitle = VIEW_TITLES[viewId] || 'Forensic Workstation View';
   const nameEl = document.getElementById('activeViewName');
   if (nameEl) nameEl.textContent = viewTitle;
@@ -2540,9 +2761,9 @@ function navigateTo(viewId) {
     case 'methods': viewport.innerHTML = render25Methods(); break;
     case 'cases': viewport.innerHTML = renderCases(); break;
     case 'vault': viewport.innerHTML = renderVault(); loadVaultEvidence(); break;
-    case 'audit': viewport.innerHTML = renderAudit(); break;
+    case 'audit': viewport.innerHTML = renderAudit(); loadAuditLedger(); break;
     case 'certificates': viewport.innerHTML = renderCertificates(); loadCertificates(); break;
-    case 'recovery': viewport.innerHTML = renderRecovery(); break;
+    case 'recovery': viewport.innerHTML = renderRecovery(); loadRecoveryCandidates(); break;
     case 'carving': viewport.innerHTML = renderCarving(); break;
     case 'fragments': viewport.innerHTML = renderFragments(); break;
     case 'damaged_media': viewport.innerHTML = renderDamagedMedia(); break;
@@ -2669,6 +2890,7 @@ async function submitSanitization(devicePath, methodId, phrase) {
       severity: 'FAIL',
       title: 'OPERATION BLOCKED',
       message: 'No active case selected. Please select or register an operational case first.',
+      workflowId: 'drive_eraser',
       target: devicePath,
     });
     return;
@@ -2693,6 +2915,7 @@ async function submitSanitization(devicePath, methodId, phrase) {
       message: `Job ${res.job_id}: ${res.verdict} | Observed Entropy: ${res.entropy_h} bits/byte | Mismatches: ${res.readback_mismatches}`,
       jobId: res.job_id,
       caseId: caseId,
+      workflowId: 'drive_eraser',
       methodId: methodId,
       target: devicePath,
     });
@@ -2704,6 +2927,7 @@ async function submitSanitization(devicePath, methodId, phrase) {
       title: 'SANITIZATION BLOCKED',
       message: ex.message,
       caseId: caseId,
+      workflowId: 'drive_eraser',
       methodId: methodId,
       target: devicePath,
     });
@@ -2819,6 +3043,7 @@ async function triggerRecoveryScan() {
       severity: 'WARN',
       title: 'SCAN BLOCKED',
       message: 'No active case selected. Please register or select a case first.',
+      workflowId: 'recovery',
     });
     return;
   }
@@ -2834,6 +3059,7 @@ async function triggerRecoveryScan() {
         title: 'TARGET INVALID',
         message: 'No storage device target or image selected for recovery scan.',
         caseId: caseId,
+        workflowId: 'recovery',
       });
       return;
     }
@@ -2854,16 +3080,18 @@ async function triggerRecoveryScan() {
       message: `Job ID ${res.job_id || 'N/A'}: Engine ${res.engine || methodId} running on ${target}`,
       jobId: res.job_id,
       caseId: caseId,
+      workflowId: 'recovery',
       methodId: methodId,
       target: target,
     });
-    await loadInitialData(caseId);
+    await loadRecoveryCandidates();
   } catch (ex) {
     showNotification({
       severity: 'FAIL',
       title: 'RECOVERY NOTICE',
       message: ex.message,
       caseId: caseId,
+      workflowId: 'recovery',
     });
   }
 }
@@ -2875,6 +3103,7 @@ async function triggerCandidateExtract(candidateId) {
       severity: 'WARN',
       title: 'EXTRACTION BLOCKED',
       message: 'No active case selected. Please register or select a case first.',
+      workflowId: 'recovery',
     });
     return;
   }
@@ -2892,14 +3121,16 @@ async function triggerCandidateExtract(candidateId) {
       title: 'EVIDENCE INGESTED',
       message: `Candidate extracted to Vault: ${res.filename} (${formatBytes(res.size_bytes)}) | SHA-256: ${(res.sha256 || '').substring(0, 16)}...`,
       caseId: caseId,
+      workflowId: 'recovery',
     });
-    await loadInitialData(caseId);
+    await loadRecoveryCandidates();
   } catch (ex) {
     showNotification({
       severity: 'FAIL',
       title: 'EXTRACTION FAILED',
       message: ex.message,
       caseId: caseId,
+      workflowId: 'recovery',
     });
   }
 }
@@ -2915,6 +3146,7 @@ async function generateCertificateForActiveCase() {
       severity: 'WARN',
       title: 'CERTIFICATE BLOCKED',
       message: 'No active case selected.',
+      workflowId: 'certificates',
     });
     return;
   }
@@ -2934,6 +3166,7 @@ async function generateCertificateForActiveCase() {
       title: 'CERTIFICATE ISSUED',
       message: `Certificate ${res.certificate_id} issued successfully and bound to case.`,
       caseId: caseId,
+      workflowId: 'certificates',
     });
     loadCertificates();
   } catch (ex) {
@@ -2942,6 +3175,7 @@ async function generateCertificateForActiveCase() {
       title: 'CERTIFICATE FAILED',
       message: ex.message || String(ex),
       caseId: caseId,
+      workflowId: 'certificates',
     });
   }
 }
@@ -3089,11 +3323,18 @@ async function loadInitialData(preserveCaseId = null) {
       if (pill) pill.textContent = `Active Case: ${STATE.activeCase.case_number}`;
     }
 
-    // 5. Load Candidates
-    STATE.candidates = await api('/api/recovery/candidates').catch(() => []);
-
-    // 6. Load Audit Ledger
-    STATE.auditEvents = await api('/api/audit/ledger').catch(() => []);
+    // 5. Load Candidates (strictly case-bound)
+    const activeCId = STATE.activeCase ? STATE.activeCase.case_id : null;
+    if (activeCId) {
+      STATE.candidates = await api(`/api/recovery/candidates?case_id=${encodeURIComponent(activeCId)}`).catch(() => []);
+      STATE.recoveryCandidates = STATE.candidates;
+      // 6. Load Audit Ledger (strictly case-bound)
+      STATE.auditEvents = await api(`/api/audit/ledger?case_id=${encodeURIComponent(activeCId)}`).catch(() => []);
+    } else {
+      STATE.candidates = [];
+      STATE.recoveryCandidates = [];
+      STATE.auditEvents = [];
+    }
 
     // Refresh Active View
     navigateTo(STATE.currentView);

@@ -152,6 +152,8 @@ class RecoveryScanRequest(BaseModel):
     source_path: str
     destination_dir: str
     case_id: Optional[str] = None
+    workflow_id: Optional[str] = None
+    target_id: Optional[str] = None
     engine: str = "TSK"  # "TSK", "CARVER", "SMART"
     max_candidates: int = 500
 
@@ -257,6 +259,8 @@ class SanitizationExecuteRequest(BaseModel):
     method_id: int
     safety_phrase_entered: str
     case_id: Optional[str] = None
+    workflow_id: Optional[str] = None
+    target_id: Optional[str] = None
     simulate_only: bool = False
 
 
@@ -292,6 +296,14 @@ class SectorBlockState(BaseModel):
 
 # ─── Real-Time Job Models ────────────────────────────────────────────────────
 
+class OperationContext(BaseModel):
+    case_id: str
+    workflow_id: str
+    job_id: Optional[str] = None
+    method_id: Optional[Union[int, str]] = None
+    target_id: Optional[str] = None
+
+
 class JobProgressUpdate(BaseModel):
     job_id: str
     operation_type: str
@@ -304,15 +316,21 @@ class JobProgressUpdate(BaseModel):
     items_processed: int
     total_items: int
     log_line: Optional[str] = None
+    case_id: Optional[str] = None
+    workflow_id: Optional[str] = None
+    method_id: Optional[Union[int, str]] = None
+    target_id: Optional[str] = None
 
 
 class JobStatusRecord(BaseModel):
     operation_id: str
     job_id: str
     case_id: str
+    workflow_id: Optional[str] = None
     evidence_id: Optional[str] = None
     actor: str
-    method_id: Optional[int] = None
+    method_id: Optional[Union[int, str]] = None
+    target_id: Optional[str] = None
     target_path: str
     operation_type: str
     status: JobLifecycleState

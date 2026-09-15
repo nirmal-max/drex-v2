@@ -226,9 +226,11 @@ class JobRegistry:
         target_path: str,
         fingerprint: Optional[str] = None,
         case_id: str = "",
+        workflow_id: Optional[str] = None,
         actor: str = "OPERATOR",
         method_id: Optional[int] = None,
         evidence_id: Optional[str] = None,
+        target_id: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> threading.Event:
         op_id = f"OP-{uuid.uuid4().hex[:8].upper()}"
@@ -236,9 +238,11 @@ class JobRegistry:
             operation_id=op_id,
             job_id=job_id,
             case_id=case_id,
+            workflow_id=workflow_id,
             actor=actor,
             operation_type=operation_type,
             target_path=target_path,
+            target_id=target_id,
             method_id=method_id,
             evidence_id=evidence_id,
             details=details,
@@ -269,6 +273,8 @@ class JobRegistry:
         actor: str,
         operation_type: str,
         target_path: str,
+        workflow_id: Optional[str] = None,
+        target_id: Optional[str] = None,
         method_id: Optional[int] = None,
         evidence_id: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
@@ -276,14 +282,18 @@ class JobRegistry:
     ) -> Dict[str, Any]:
         with self._lock:
             now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            resolved_wf = workflow_id or f"WF-{operation_type.lower()}"
+            resolved_target_id = target_id or target_path
             record = {
                 "schema_version": "2.0",
                 "operation_id": operation_id,
                 "job_id": job_id,
                 "case_id": case_id,
+                "workflow_id": resolved_wf,
                 "evidence_id": evidence_id,
                 "actor": actor,
                 "method_id": method_id,
+                "target_id": resolved_target_id,
                 "target_path": target_path,
                 "operation_type": operation_type,
                 "status": "QUEUED",
@@ -813,14 +823,12 @@ def restore_case(
 
 @app.get("/api/evidence", response_model=List[models.EvidenceItemRecord])
 def list_evidence(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(require_permission("evidence:read"))):
-    """List isolated evidence artifacts in the Evidence Vault."""
-    target_case_id = case_id
-    if not target_case_id:
-        cases = case_manager.list_cases()
-        if cases:
-            target_case_id = cases[0].case_id
+    """List isolated evidence artifacts in the Evidence Vault for the specified case."""
+    if not case_id:
+        return []
 
-    if not target_case_id:
+    target_case_id = case_id
+    if not case_manager.get_case(target_case_id):
         return []
 
     out = []
@@ -884,25 +892,32 @@ def list_evidence(case_id: Optional[str] = None, current_user: Dict[str, Any] = 
 @app.get("/api/jobs/{job_id}", response_model=models.JobStatusRecord)
 def get_job_status(
     job_id: str,
+    case_id: Optional[str] = Query(None),
     current_user: Dict[str, Any] = Depends(require_permission("jobs:read")),
 ):
-    """Query durable job status record."""
+    """Query durable job status record with optional case isolation enforcement."""
     job = job_registry.get_job(job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found.")
+    if case_id and job.get("case_id") != case_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' does not belong to case '{case_id}'.")
     return models.JobStatusRecord(**job)
 
 
 @app.post("/api/jobs/{job_id}/cancel", response_model=models.JobStatusRecord)
 def cancel_job(
     job_id: str,
+    case_id: Optional[str] = Query(None),
     current_user: Dict[str, Any] = Depends(require_permission("jobs:cancel")),
 ):
-    """Request cooperative cancellation of an active job."""
-    job = job_registry.cancel_job(job_id)
+    """Request cooperative cancellation of an active job with case boundary enforcement."""
+    job = job_registry.get_job(job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found.")
-    return models.JobStatusRecord(**job)
+    if case_id and job.get("case_id") != case_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' does not belong to case '{case_id}'.")
+    res = job_registry.cancel_job(job_id)
+    return models.JobStatusRecord(**res)
 
 
 # ─── Forensic Recovery & Carving Endpoints ────────────────────────────────────
@@ -914,8 +929,19 @@ def launch_recovery_scan(
     current_user: Dict[str, Any] = Depends(require_permission("recovery:scan")),
 ):
     """Launch non-blocking forensic recovery or raw carving scan with duplicate detection and target lock."""
-    # 1. Validate case ID strictly
-    if req.case_id:
+    # 1. Resolve Case Context
+    if not req.case_id:
+        cases = case_manager.list_cases()
+        if cases:
+            target_case_id = cases[0].case_id
+        else:
+            adhoc_case = case_manager.create_case(
+                case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
+                title="Ad-hoc Triage Operation",
+                examiner=current_user.get("display_name", "Forensic Operator"),
+            )
+            target_case_id = adhoc_case.case_id
+    else:
         c = case_manager.get_case(req.case_id)
         if not c:
             raise HTTPException(
@@ -923,14 +949,6 @@ def launch_recovery_scan(
                 detail=f"Invalid case ID: '{req.case_id}'. Case not found.",
             )
         target_case_id = req.case_id
-    else:
-        cases = case_manager.list_cases()
-        if not cases:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No active case registered. Operation blocked.",
-            )
-        target_case_id = cases[0].case_id
 
     # 2. Resolve method/engine identity
     engine_str = str(req.engine).lower().strip()
@@ -964,11 +982,14 @@ def launch_recovery_scan(
             "status": existing["status"],
             "engine": resolved_method,
             "source": req.source_path,
+            "workflow_id": existing.get("workflow_id", req.workflow_id or f"WF-REC-{resolved_method.upper()}"),
+            "case_id": target_case_id,
             "message": "Identical active recovery scan in progress; attached to existing job.",
             "is_duplicate": True,
         }
 
     job_id = f"REC-{uuid.uuid4().hex[:8].upper()}"
+    resolved_wf = req.workflow_id or f"WF-REC-{resolved_method.upper()}"
 
     if not job_registry.acquire_target_lock(req.source_path, job_id):
         raise HTTPException(
@@ -976,14 +997,23 @@ def launch_recovery_scan(
             detail=f"Target '{req.source_path}' is currently locked by another active operation.",
         )
 
+    method_int_map = {
+        "quick": 17, "smart": 18, "targeted": 19, "filesystem": 20,
+        "deep": 21, "fragment": 22, "raid": 23, "damaged": 24, "forensic": 25,
+    }
+    resolved_method_id = int(req.engine) if str(req.engine).isdigit() else method_int_map.get(resolved_method, 17)
+    target_id_val = req.target_id or req.source_path
+
     cancel_token = job_registry.register_job(
         job_id=job_id,
         operation_type="RECOVERY_SCAN",
         target_path=req.source_path,
+        target_id=target_id_val,
+        workflow_id=resolved_wf,
         fingerprint=fp,
         case_id=target_case_id,
         actor=current_user.get("display_name", "ANALYST"),
-        method_id=resolved_method,
+        method_id=resolved_method_id,
     )
 
     def run_scan_job():
@@ -1090,100 +1120,50 @@ def launch_recovery_scan(
 @app.get("/api/recovery/candidates", response_model=List[models.RecoveryCandidateRecord])
 def get_recovery_candidates(
     case_id: Optional[str] = None,
+    file_type: Optional[str] = None,
+    validation_state: Optional[str] = None,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     current_user: Dict[str, Any] = Depends(require_any_permission(["recovery:read", "recovery:scan", "recovery:extract", "recovery:reconstruct"])),
 ):
-    """Return candidates with explainable 5-factor confidence scoring and pagination."""
-    target_case_id = case_id
-    if not target_case_id and case_manager.cases_dir.exists():
-        for p in case_manager.cases_dir.iterdir():
-            if p.is_dir() and p.name.startswith("CASE-"):
-                target_case_id = p.name
-                break
+    """Return candidates with explainable 5-factor confidence scoring and pagination strictly isolated to the requested case."""
+    if not case_id:
+        return []
+
+    c = case_manager.get_case(case_id)
+    if not c:
+        return []
 
     records: List[models.RecoveryCandidateRecord] = []
-    if target_case_id:
-        vault_cands = case_manager.list_recovery_candidates(target_case_id, limit=limit, offset=offset)
-        for c in vault_cands:
-            c_score = c.evidence_confidence_score
-            c_tier = "HIGH" if c_score >= 0.85 else ("MEDIUM" if c_score >= 0.60 else "LOW")
-            factors = {
-                "header_signature": 0.25 if c_score >= 0.25 else round(c_score, 3),
-                "footer_signature": 0.25 if c_score >= 0.50 else round(max(0.0, c_score - 0.25), 3),
-                "structural_integrity": 0.20 if c_score >= 0.70 else round(max(0.0, c_score - 0.50), 3),
-                "entropy_validation": 0.15,
-                "filesystem_alignment": 0.15,
-            }
-            records.append(
-                models.RecoveryCandidateRecord(
-                    candidate_id=c.candidate_id,
-                    filename=c.filesystem_origin or f"{c.carving_method.lower()}_{c.candidate_id}.bin",
-                    file_type=c.carving_method.upper(),
-                    size_bytes=c.output_size,
-                    confidence_score=c.evidence_confidence_score,
-                    confidence_tier=c_tier,
-                    confidence_factors=factors,
-                    provenance=f"{c.reconstruction_method} ({c.validation_state.value})",
-                    sha256=c.output_hash,
-                    offset=c.source_offset or 0,
-                    is_recovered=(c.validation_state == RecoveryCandidateState.RECOVERED_ARTIFACT),
-                    validation_verdict="VALIDATED" if c.validation_state in (RecoveryCandidateState.VALIDATED_CANDIDATE, RecoveryCandidateState.RECONSTRUCTED_CANDIDATE, RecoveryCandidateState.RECOVERED_ARTIFACT) else "CANDIDATE_UNVERIFIED",
-                    validation_state=c.validation_state.value,
-                    limitations=c.limitations,
-                )
+    vault_cands = case_manager.list_recovery_candidates(case_id, limit=limit, offset=offset, file_type=file_type, validation_state=validation_state)
+    for c in vault_cands:
+        c_score = c.evidence_confidence_score
+        c_tier = "HIGH" if c_score >= 0.85 else ("MEDIUM" if c_score >= 0.60 else "LOW")
+        factors = {
+            "header_signature": 0.25 if c_score >= 0.25 else round(c_score, 3),
+            "footer_signature": 0.25 if c_score >= 0.50 else round(max(0.0, c_score - 0.25), 3),
+            "structural_integrity": 0.20 if c_score >= 0.70 else round(max(0.0, c_score - 0.50), 3),
+            "entropy_validation": 0.15,
+            "filesystem_alignment": 0.15,
+        }
+        records.append(
+            models.RecoveryCandidateRecord(
+                candidate_id=c.candidate_id,
+                filename=c.filesystem_origin or f"{c.carving_method.lower()}_{c.candidate_id}.bin",
+                file_type=c.carving_method.upper(),
+                size_bytes=c.output_size,
+                confidence_score=c.evidence_confidence_score,
+                confidence_tier=c_tier,
+                confidence_factors=factors,
+                provenance=f"{c.reconstruction_method} ({c.validation_state.value})",
+                sha256=c.output_hash,
+                offset=c.source_offset or 0,
+                is_recovered=(c.validation_state == RecoveryCandidateState.RECOVERED_ARTIFACT),
+                validation_verdict="VALIDATED" if c.validation_state in (RecoveryCandidateState.VALIDATED_CANDIDATE, RecoveryCandidateState.RECONSTRUCTED_CANDIDATE, RecoveryCandidateState.RECOVERED_ARTIFACT) else "CANDIDATE_UNVERIFIED",
+                validation_state=c.validation_state.value,
+                limitations=c.limitations,
             )
-
-    if not records and not case_id:
-        sample_candidates = [
-            models.RecoveryCandidateRecord(
-                candidate_id="CAND-001",
-                filename="confidential_audit_2026.pdf",
-                file_type="PDF",
-                size_bytes=1048576,
-                confidence_score=0.965,
-                confidence_tier="HIGH",
-                confidence_factors={"header_signature": 0.25, "footer_signature": 0.25, "structural_integrity": 0.20, "entropy_validation": 0.14, "filesystem_alignment": 0.125},
-                provenance="TSK Inode 8412 + Carve Cross-Validation",
-                sha256="4a6f8b9e1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f",
-                offset=10485760,
-                is_recovered=True,
-                validation_verdict="VALIDATED",
-                validation_state="RECOVERED_ARTIFACT",
-            ),
-            models.RecoveryCandidateRecord(
-                candidate_id="CAND-002",
-                filename="device_telemetry_snapshot.jpeg",
-                file_type="JPEG",
-                size_bytes=421890,
-                confidence_score=0.912,
-                confidence_tier="HIGH",
-                confidence_factors={"header_signature": 0.25, "footer_signature": 0.25, "structural_integrity": 0.18, "entropy_validation": 0.13, "filesystem_alignment": 0.102},
-                provenance="PhotoRec Pure Sector Carving",
-                sha256="e8f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f4a6f8b9e1c2d3e4f5a6b7c8d9",
-                offset=20971520,
-                is_recovered=True,
-                validation_verdict="VALIDATED",
-                validation_state="RECOVERED_ARTIFACT",
-            ),
-            models.RecoveryCandidateRecord(
-                candidate_id="CAND-003",
-                filename="sqlite_evidence_vault.db",
-                file_type="SQLITE",
-                size_bytes=2097152,
-                confidence_score=0.745,
-                confidence_tier="MEDIUM",
-                confidence_factors={"header_signature": 0.25, "footer_signature": 0.00, "structural_integrity": 0.20, "entropy_validation": 0.145, "filesystem_alignment": 0.15},
-                provenance="Magic-Byte Header Match",
-                sha256="c0d1e2f3a4b5c6d7e8f4a6f8b9e1c2d3e4f5a6b7c8d9e8f1a2b3c4d5e6f7a8b9",
-                offset=41943040,
-                is_recovered=False,
-                validation_verdict="PARTIAL_HEADER_ONLY",
-                validation_state="CANDIDATE",
-            ),
-        ]
-        return sample_candidates[offset : offset + limit]
-
+        )
     return records
 
 
@@ -1427,18 +1407,32 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
             detail=f"SAFETY TRIPWIRE TRIGGERED: Destructive command rejected. Target '{req.target_path}' is an active Windows system/boot drive.",
         )
 
-    # 2. Validate exact safety phrase
-    clean_target = req.target_path.replace("\\", "_").replace("/", "_").replace(".", "_").strip("_").upper()
-    expected_phrase = f"ERASE-{clean_target}-PERMANENT"
+    # 2. Validate exact safety phrase (accept both standard and normalized formats)
+    clean_target_legacy = req.target_path.replace("\\", "_").replace("/", "_").replace(".", "_").strip("_").upper()
+    clean_target_norm = req.target_path.replace("\\", "_").replace("/", "_").replace(".", "_").replace(":", "_").strip("_").upper()
+    expected_legacy = f"ERASE-{clean_target_legacy}-PERMANENT"
+    expected_norm = f"ERASE-{clean_target_norm}-PERMANENT"
+    phrase_entered = req.safety_phrase_entered.strip().upper()
 
-    if req.safety_phrase_entered.strip().upper() != expected_phrase:
+    if phrase_entered != expected_legacy and phrase_entered != expected_norm:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Confirmation phrase mismatch. Expected '{expected_phrase}', received '{req.safety_phrase_entered}'.",
+            detail=f"Confirmation phrase mismatch. Expected '{expected_legacy}', received '{req.safety_phrase_entered}'.",
         )
 
-    # 3. Validate Case ID strictly
-    if req.case_id:
+    # 3. Resolve Case Context
+    if not req.case_id:
+        cases = case_manager.list_cases()
+        if cases:
+            target_case_id = cases[0].case_id
+        else:
+            adhoc_case = case_manager.create_case(
+                case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
+                title="Ad-hoc Triage Operation",
+                examiner=current_user.get("display_name", "Forensic Operator"),
+            )
+            target_case_id = adhoc_case.case_id
+    else:
         c = case_manager.get_case(req.case_id)
         if not c:
             raise HTTPException(
@@ -1446,14 +1440,6 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
                 detail=f"Invalid case ID: '{req.case_id}'. Case not found.",
             )
         target_case_id = req.case_id
-    else:
-        cases = case_manager.list_cases()
-        if not cases:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No active case registered. Operation blocked.",
-            )
-        target_case_id = cases[0].case_id
 
     # 4. Pre-Execution Revalidation (TOCTOU guard for physical/device targets)
     if "PhysicalDrive" in req.target_path or req.target_path.startswith("\\\\.\\"):
@@ -1491,6 +1477,7 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
         )
 
     job_id = f"SAN-{uuid.uuid4().hex[:8].upper()}"
+    resolved_wf = req.workflow_id or "WF-SAN-DRIVE"
 
     # 6. Acquire target lock
     if not job_registry.acquire_target_lock(req.target_path, job_id):
@@ -1503,6 +1490,8 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
         job_id=job_id,
         operation_type="SANITIZATION_EXECUTE",
         target_path=req.target_path,
+        target_id=req.target_id or req.target_path,
+        workflow_id=resolved_wf,
         fingerprint=fp,
         case_id=target_case_id,
         actor=current_user.get("display_name", "OPERATOR"),
@@ -1696,17 +1685,15 @@ def get_audit_ledger(
     offset: int = Query(default=0, ge=0),
     current_user: Dict[str, Any] = Depends(require_permission("audit:read")),
 ):
-    """Retrieve cryptographically linked SHA-256 audit ledger with pagination."""
-    target_case_id = case_id
-    if not target_case_id:
-        cases = case_manager.list_cases()
-        if cases:
-            target_case_id = cases[0].case_id
-
-    if not target_case_id:
+    """Retrieve cryptographically linked SHA-256 audit ledger with pagination strictly isolated to the requested case."""
+    if not case_id:
         return []
 
-    records = case_manager.get_audit_chain(target_case_id)
+    c = case_manager.get_case(case_id)
+    if not c:
+        return []
+
+    records = case_manager.get_audit_chain(case_id)
     out = []
     for r in records:
         out.append(
@@ -1729,17 +1716,15 @@ def get_audit_ledger(
 
 @app.post("/api/audit/verify")
 def verify_audit_integrity(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(require_permission("audit:verify"))):
-    """Validate full SHA-256 hash-linked audit chain integrity of the audit log."""
-    target_case_id = case_id
-    if not target_case_id:
-        cases = case_manager.list_cases()
-        if cases:
-            target_case_id = cases[0].case_id
+    """Validate full SHA-256 hash-linked audit chain integrity for the specified case."""
+    if not case_id:
+        return {"is_valid": True, "verified_records_count": 0, "total_events": 0, "faulty_sequence": None, "verdict": "PASS — ZERO RECORDS", "details": ["No case specified."]}
 
-    if not target_case_id:
-        return {"is_valid": True, "verified_records_count": 0, "verdict": "PASS — ZERO RECORDS"}
+    c = case_manager.get_case(case_id)
+    if not c:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Case '{case_id}' not found.")
 
-    result = case_manager.verify_case_audit_chain(target_case_id)
+    result = case_manager.verify_case_audit_chain(case_id)
     is_valid = result.status.name == "VALID"
     return {
         "is_valid": is_valid,
@@ -2103,23 +2088,21 @@ def list_certificates(
     offset: int = Query(default=0, ge=0),
     current_user: Dict[str, Any] = Depends(require_permission("certificates:read")),
 ):
-    """Retrieve all issued certificates for a given case with pagination."""
-    target_case_id = case_id
-    if not target_case_id:
-        cases = case_manager.list_cases()
-        if cases:
-            target_case_id = cases[0].case_id
-    if not target_case_id:
+    """Retrieve all issued certificates strictly isolated for a given case with pagination."""
+    if not case_id:
         return []
 
-    certs = case_manager.list_certificates(target_case_id)
+    if not case_manager.get_case(case_id):
+        return []
+
+    certs = case_manager.list_certificates(case_id)
     records = []
     for c in certs:
         records.append(
             models.CertificateRecordModel(
                 certificate_id=c.get("certificate_id", ""),
                 certificate_version=c.get("certificate_version", "2.0"),
-                case_id=c.get("case_id", target_case_id),
+                case_id=c.get("case_id", case_id),
                 case_name=c.get("case_name", "Case"),
                 examiner_name=c.get("examiner_name", "Examiner"),
                 organization=c.get("organization", "Lab"),
@@ -2140,7 +2123,7 @@ def list_certificates(
                 audit_chain_event_hash=c.get("audit_chain_event_hash", ""),
                 tamper_evident_signature=c.get("tamper_evident_signature", ""),
                 pdf_sha256=c.get("pdf_sha256"),
-                pdf_download_url=f"/api/certificates/{c.get('certificate_id')}/pdf?case_id={c.get('case_id', target_case_id)}",
+                pdf_download_url=f"/api/certificates/{c.get('certificate_id')}/pdf?case_id={c.get('case_id', case_id)}",
                 forensic_limitations=c.get("forensic_limitations", []),
             )
         )
