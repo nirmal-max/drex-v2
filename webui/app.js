@@ -189,6 +189,20 @@ const formatBytes = b => {
   return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
+function renderOperationalContextBar(workflowName, sourceName = 'DEFAULT_STORAGE', methodName = 'STANDARD_PIPELINE', jobStatus = 'IDLE') {
+  const activeCase = STATE.activeCase;
+  const caseLabel = activeCase ? `${activeCase.case_number} (${activeCase.title || activeCase.case_id})` : 'NO ACTIVE CASE';
+  return `
+    <div class="operation-context-bar" style="display: flex; gap: 14px; align-items: center; justify-content: space-between; background: var(--drex-bg-surface-subtle); border: 1px solid var(--drex-border-base); border-radius: var(--drex-radius-md); padding: 8px 14px; margin-bottom: 14px; font-size: 11px; flex-wrap: wrap;">
+      <div><span style="color: var(--drex-text-muted); font-weight: 700;">CASE:</span> <strong style="color: var(--drex-primary); font-family: var(--drex-font-mono);">${esc(caseLabel)}</strong></div>
+      <div><span style="color: var(--drex-text-muted); font-weight: 700;">SOURCE:</span> <code style="font-size: 10px;">${esc(sourceName)}</code></div>
+      <div><span style="color: var(--drex-text-muted); font-weight: 700;">WORKFLOW:</span> <strong>${esc(workflowName)}</strong></div>
+      <div><span style="color: var(--drex-text-muted); font-weight: 700;">METHOD:</span> <span>${esc(methodName)}</span></div>
+      <div><span style="color: var(--drex-text-muted); font-weight: 700;">STATUS:</span> <span class="badge ${jobStatus === 'IDLE' ? 'badge-neutral' : (jobStatus === 'RUNNING' ? 'badge-warn' : 'badge-pass')}" style="font-size: 10px;">${esc(jobStatus)}</span></div>
+    </div>
+  `;
+}
+
 // ─── HTTP API Fetch Wrapper ───────────────────────────────────────────────────
 
 async function api(path, options = {}) {
@@ -526,8 +540,9 @@ async function loadVaultEvidence() {
 // 5. Audit Chain
 function renderAudit() {
   return `
+    ${renderOperationalContextBar('Audit Chain Ledger', 'Forensic SQLite & Vault Ledger', 'Method 25 · Forensic Hash-Chain', 'SEALED')}
     <div class="card">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
         <div>
           <div class="section-label">CRYPTOGRAPHIC INTEGRITY</div>
           <h2 class="card-title">SHA-256 Hash-Chained Audit Ledger</h2>
@@ -559,21 +574,41 @@ async function loadAuditLedger() {
       container.innerHTML = '<p style="padding: 20px; color: var(--drex-text-muted);">No audit events recorded for this case yet.</p>';
       return;
     }
-    container.innerHTML = STATE.auditEvents.map(e => `
-      <div class="timeline-event">
-        <div class="timeline-dot"></div>
-        <div class="timeline-content">
-          <div style="display: flex; justify-content: space-between;">
-            <strong>Seq #${String(e.sequence).padStart(3, '0')} · ${esc(e.event_type)}</strong>
-            <span class="timeline-meta">${esc(e.timestamp_utc)}</span>
-          </div>
-          <div style="font-size: 12px; margin-top: 2px;">${esc(e.payload_summary)}</div>
-          <div style="font-family: var(--drex-font-mono); font-size: 10px; color: var(--drex-text-muted); margin-top: 4px;">
-            SHA256: ${esc((e.current_hash || '').slice(0, 32))}... (Prev: ${esc((e.previous_hash || '').slice(0, 16))}...)
+    container.innerHTML = STATE.auditEvents.map(e => {
+      const meta = e.metadata || {};
+      const target = meta.target_path || meta.target_identifier || 'Case Vault';
+      const methodId = meta.method_id ? `Method M${String(meta.method_id).padStart(2, '0')}` : 'System Ledger';
+      const eventJson = JSON.stringify(e, null, 2);
+      const elemId = `rawEvent_${e.sequence}`;
+      return `
+        <div class="timeline-event" style="margin-bottom: 12px; background: var(--drex-bg-surface); border: 1px solid var(--drex-border-base); border-radius: var(--drex-radius-md); padding: 12px 16px;">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content" style="width: 100%;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px;">
+              <div>
+                <span class="badge badge-pass" style="font-size: 10px;">Seq #${String(e.sequence).padStart(3, '0')}</span>
+                <strong style="font-size: 13px; margin-left: 6px;">${esc(e.event_type)}</strong>
+                <span class="badge" style="background: var(--drex-bg-surface-subtle); margin-left: 6px; font-size: 10px;">${esc(methodId)}</span>
+              </div>
+              <span class="timeline-meta" style="font-size: 11px;">${esc(e.timestamp_utc)}</span>
+            </div>
+            <div style="font-size: 12px; margin-top: 6px; color: var(--drex-text-main); font-weight: 500;">${esc(e.payload_summary)}</div>
+            <div style="display: flex; gap: 16px; margin-top: 6px; font-size: 11px; color: var(--drex-text-muted); flex-wrap: wrap;">
+              <div>Target: <code>${esc(target)}</code></div>
+              <div>Case: <strong>${esc(e.case_id)}</strong></div>
+              <div>Actor: <span>${esc(e.actor || 'Forensic System')}</span></div>
+            </div>
+            <div style="font-family: var(--drex-font-mono); font-size: 10px; color: var(--drex-text-muted); margin-top: 6px; background: var(--drex-bg-surface-subtle); padding: 4px 8px; border-radius: 3px; word-break: break-all;">
+              SHA-256 Event Hash: <span style="color: var(--drex-text-main);">${esc(e.current_hash)}</span> (Prior: ${esc((e.previous_hash || '').slice(0, 16))}...)
+            </div>
+            <div style="margin-top: 8px;">
+              <button class="action-btn" style="width: auto; padding: 2px 8px; font-size: 10px; background: var(--drex-bg-surface-subtle); color: var(--drex-text-main); border: 1px solid var(--drex-border-base);" onclick="const el=document.getElementById('${elemId}'); el.style.display=el.style.display==='none'?'block':'none';">🔍 View Raw Event JSON</button>
+            </div>
+            <pre id="${elemId}" style="display: none; margin-top: 8px; padding: 10px; background: #0f172a; color: #a5f3fc; border-radius: 4px; font-size: 10px; font-family: var(--drex-font-mono); overflow-x: auto;">${esc(eventJson)}</pre>
           </div>
         </div>
-      </div>
-    `).join('');
+      `;
+    }).join('');
   } catch (ex) {
     container.innerHTML = `<p style="padding: 20px; color: var(--drex-status-fail);">Failed to load audit ledger: ${esc(ex.message)}</p>`;
   }
@@ -689,7 +724,27 @@ async function loadCertificates() {
 }
 
 // 7. Forensic Recovery
+function handleRecoverySourceChange(newSource) {
+  const oldSource = STATE.selectedRecoverySource;
+  if (oldSource && oldSource !== newSource) {
+    const alertBox = document.getElementById('recoverySourceChangeAlert');
+    if (alertBox) {
+      alertBox.style.display = 'block';
+      const oldEl = document.getElementById('oldSourceLabel');
+      const newEl = document.getElementById('newSourceLabel');
+      if (oldEl) oldEl.textContent = oldSource;
+      if (newEl) newEl.textContent = newSource;
+    }
+    STATE.recoveryCandidates = [];
+    renderRecoveryTable();
+  }
+  STATE.selectedRecoverySource = newSource;
+}
+
 function renderRecovery() {
+  const selectedSource = STATE.selectedRecoverySource || (STATE.devices.length > 0 ? STATE.devices[0].device_path : 'tests/fixtures/sample_disk.img');
+  STATE.selectedRecoverySource = selectedSource;
+
   const recoveryMethods = (STATE.methodsRegistry && STATE.methodsRegistry.length > 0)
     ? STATE.methodsRegistry.filter(m => m.category === 'Recovery' || (m.id >= 17 && m.id <= 25))
     : [
@@ -708,55 +763,78 @@ function renderRecovery() {
     <option value="${m.id}" ${m.id === 17 ? 'selected' : ''}>[Method ${String(m.id).padStart(2, '0')}] ${esc(m.name)} (${esc(m.status)})</option>
   `).join('');
 
-  const cands = (STATE.recoveryCandidates && STATE.recoveryCandidates.length > 0)
-    ? STATE.recoveryCandidates
-    : (STATE.candidates || []);
-
-  const candidateRows = cands.map(c => `
-    <tr>
-      <td><strong>${esc(c.candidate_id)}</strong></td>
-      <td>${esc(c.filename)}</td>
-      <td><span class="badge" style="background:#eaf3ff; color:#1769e0;">${esc(c.file_type)}</span></td>
-      <td>${formatBytes(c.size_bytes)}</td>
-      <td>
-        <span class="badge ${c.confidence_tier === 'HIGH' ? 'badge-pass' : (c.confidence_tier === 'MEDIUM' ? 'badge-warn' : 'badge-danger')}">
-          ${c.confidence_score.toFixed(3)} (${esc(c.confidence_tier)})
-        </span>
-      </td>
-      <td>
-        <span class="badge ${c.is_recovered ? 'badge-pass' : (c.validation_state === 'RECONSTRUCTED_CANDIDATE' ? 'badge-info' : 'badge-neutral')}" style="font-size: 10px;">
-          ${esc(c.validation_state || (c.is_recovered ? 'RECOVERED_ARTIFACT' : 'CANDIDATE'))}
-        </span>
-      </td>
-      <td><small style="color: var(--drex-text-muted);">${esc(c.provenance)}</small></td>
-      <td><span class="badge badge-pass">${esc(c.validation_verdict)}</span></td>
-      <td>
-        ${!c.is_recovered ? `<button class="action-btn" style="padding: 4px 8px; font-size: 11px; background: var(--drex-primary); color: #fff;" onclick="triggerCandidateExtract('${esc(c.candidate_id)}')">📥 Ingest to Vault</button>` : `<span style="color:#168a4a; font-weight:600; font-size:11px;">✓ Vault Ingested</span>`}
-      </td>
-    </tr>
+  const deviceOptions = (STATE.devices || []).map(d => `
+    <option value="${esc(d.device_path)}">Physical Drive: ${esc(d.model)} (${esc(d.device_path)}) [${esc(d.capacity_human)}]</option>
   `).join('');
 
   return `
+    ${renderOperationalContextBar('Forensic Filesystem Recovery', selectedSource, 'Method 17–25 · Multi-Engine Suite', STATE.recoveryJobStatus || 'IDLE')}
+    
+    <div id="recoverySourceChangeAlert" style="display: none; margin-bottom: 14px; padding: 12px 16px; background: #fffbeb; border: 1px solid #fde68a; border-radius: var(--drex-radius-md); font-size: 12px; color: #92400e;">
+      <strong>⚠ SOURCE CHANGED:</strong> Target changed from <code id="oldSourceLabel"></code> to <code id="newSourceLabel"></code>. Previous recovery results have been unlinked. Please launch a new scan for the selected target.
+    </div>
+
     <div class="card">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
+      <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
         <div>
           <div class="section-label">FORENSIC CARVING & RECONSTRUCTION</div>
-          <h2 class="card-title">Multi-Engine Recovery & Fragment Candidates</h2>
-        </div>
-        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-          <select id="recoveryMethodSelect" class="safety-input" style="width: auto; padding: 6px;">
-            ${methodOptions}
-          </select>
-          <button class="action-btn" style="width: auto; background: var(--drex-surface-2); color: var(--drex-text); border: 1px solid var(--drex-border-base); padding: 8px 14px;" onclick="triggerFragmentReconstructionDemo()">🧩 Reconstruct Fragments</button>
-          <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff; padding: 8px 14px;" onclick="triggerRecoveryScan()">⌕ Launch Scan</button>
+          <h2 class="card-title">Multi-Engine Recovery & Inode Extraction</h2>
+          <p style="color: var(--drex-text-muted); font-size: 12px; margin-top: 4px;">
+            Examines filesystem structures (FAT32, NTFS, EXT4, exFAT) and sector streams to recover intact files, metadata records, and cluster runs.
+          </p>
         </div>
       </div>
-      <div class="table-wrap">
+
+      <div class="grid grid-3 mt-12" style="gap: 12px;">
+        <div>
+          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">RECOVERY SOURCE TARGET</label>
+          <select id="recoveryTargetSelect" class="safety-input" style="margin-top: 4px; padding: 6px;" onchange="handleRecoverySourceChange(this.value)">
+            ${deviceOptions}
+            <option value="tests/fixtures/sample_disk.img" ${selectedSource === 'tests/fixtures/sample_disk.img' ? 'selected' : ''}>🧪 TEST FIXTURE (tests/fixtures/sample_disk.img)</option>
+            <option value="D:\\ForensicData\\TriageTarget.img" ${selectedSource === 'D:\\ForensicData\\TriageTarget.img' ? 'selected' : ''}>📁 Disk Image (D:\\ForensicData\\TriageTarget.img)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">EXTRACTION ALGORITHM</label>
+          <select id="recoveryMethodSelect" class="safety-input" style="margin-top: 4px; padding: 6px;">
+            ${methodOptions}
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">DESTINATION DIRECTORY</label>
+          <input type="text" id="recoveryDestDir" class="safety-input" style="margin-top: 4px; padding: 6px;" value="vault/extracted" readonly>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap;">
+        <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff; padding: 8px 16px;" onclick="triggerRecoveryScan()">⌕ Launch Recovery Scan</button>
+        <button class="action-btn" style="width: auto; background: var(--drex-surface-2); color: var(--drex-text); border: 1px solid var(--drex-border-base); padding: 8px 14px;" onclick="triggerFragmentReconstructionDemo()">🧩 Reconstruct Fragments →</button>
+        <button class="action-btn" style="width: auto; background: var(--drex-bg-surface-subtle); color: var(--drex-text-main); border: 1px solid var(--drex-border-base); padding: 8px 14px;" onclick="loadRecoveryCandidates()">↻ Refresh Candidates</button>
+      </div>
+
+      <div class="table-wrap mt-16">
         <table class="table">
           <thead>
-            <tr><th>Candidate</th><th>Filename</th><th>Format</th><th>Size</th><th>Evidence Confidence</th><th>State</th><th>Provenance</th><th>Structural Verdict</th><th>Vault Action</th></tr>
+            <tr>
+              <th>Candidate ID</th>
+              <th>Filename</th>
+              <th>Format</th>
+              <th>Size</th>
+              <th>Confidence</th>
+              <th>Source Provenance</th>
+              <th>Structural Verdict</th>
+              <th>Vault Action</th>
+            </tr>
           </thead>
-          <tbody id="recoveryCandidatesTbody">${candidateRows || '<tr><td colspan="9" style="text-align:center; padding:20px;">No candidates extracted.</td></tr>'}</tbody>
+          <tbody id="recoveryCandidatesTbody">
+            <tr>
+              <td colspan="8" style="text-align: center; padding: 32px; color: var(--drex-text-muted);">
+                <div style="font-size: 24px; margin-bottom: 6px;">⌕</div>
+                <strong>NO RECOVERY RESULTS</strong>
+                <p style="font-size: 11px; margin-top: 4px;">No scan has been executed for this source. Select a target and click <strong>Launch Recovery Scan</strong> to extract candidates.</p>
+              </td>
+            </tr>
+          </tbody>
         </table>
       </div>
     </div>
@@ -788,37 +866,74 @@ function renderRecoveryTable() {
     ? STATE.recoveryCandidates
     : (STATE.candidates || []);
   if (cands.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:20px;">No candidates extracted.</td></tr>';
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="8" style="text-align: center; padding: 32px; color: var(--drex-text-muted);">
+          <div style="font-size: 24px; margin-bottom: 6px;">⌕</div>
+          <strong>NO RECOVERY RESULTS</strong>
+          <p style="font-size: 11px; margin-top: 4px;">No scan has been executed for this source. Select a target and click <strong>Launch Recovery Scan</strong> to extract candidates.</p>
+        </td>
+      </tr>
+    `;
     return;
   }
-  tbody.innerHTML = cands.map(c => `
-    <tr>
-      <td><strong>${esc(c.candidate_id)}</strong></td>
-      <td>${esc(c.filename)}</td>
-      <td><span class="badge" style="background:#eaf3ff; color:#1769e0;">${esc(c.file_type)}</span></td>
-      <td>${formatBytes(c.size_bytes)}</td>
-      <td>
-        <span class="badge ${c.confidence_tier === 'HIGH' ? 'badge-pass' : (c.confidence_tier === 'MEDIUM' ? 'badge-warn' : 'badge-danger')}">
-          ${c.confidence_score.toFixed(3)} (${esc(c.confidence_tier)})
-        </span>
-      </td>
-      <td>
-        <span class="badge ${c.is_recovered ? 'badge-pass' : (c.validation_state === 'RECONSTRUCTED_CANDIDATE' ? 'badge-info' : 'badge-neutral')}" style="font-size: 10px;">
-          ${esc(c.validation_state || (c.is_recovered ? 'RECOVERED_ARTIFACT' : 'CANDIDATE'))}
-        </span>
-      </td>
-      <td><small style="color: var(--drex-text-muted);">${esc(c.provenance)}</small></td>
-      <td><span class="badge badge-pass">${esc(c.validation_verdict)}</span></td>
-      <td>
-        ${!c.is_recovered ? `<button class="action-btn" style="padding: 4px 8px; font-size: 11px; background: var(--drex-primary); color: #fff;" onclick="triggerCandidateExtract('${esc(c.candidate_id)}')">📥 Ingest to Vault</button>` : `<span style="color:#168a4a; font-weight:600; font-size:11px;">✓ Vault Ingested</span>`}
-      </td>
-    </tr>
-  `).join('');
+  tbody.innerHTML = cands.map(c => {
+    let provBadge = '<span class="badge badge-pass">REAL EVIDENCE</span>';
+    const provStr = String(c.provenance || c.source_path || '');
+    if (provStr.includes('fixture') || provStr.includes('sample_disk') || provStr.includes('synthetic')) {
+      provBadge = '<span class="badge" style="background:#fef3c7; color:#92400e; border:1px solid #fde68a;">🧪 TEST FIXTURE</span>';
+    } else if (provStr.includes('EVAL') || (c.case_id && c.case_id.includes('EVAL'))) {
+      provBadge = '<span class="badge" style="background:#ede9fe; color:#5b21b6; border:1px solid #ddd6fe;">🎯 EVALUATION ARTIFACT</span>';
+    }
+    return `
+      <tr>
+        <td><strong>${esc(c.candidate_id)}</strong></td>
+        <td>${esc(c.filename)}</td>
+        <td><span class="badge" style="background:#eaf3ff; color:#1769e0;">${esc(c.file_type)}</span></td>
+        <td>${formatBytes(c.size_bytes)}</td>
+        <td>
+          <span class="badge ${c.confidence_tier === 'HIGH' ? 'badge-pass' : (c.confidence_tier === 'MEDIUM' ? 'badge-warn' : 'badge-danger')}">
+            ${(c.confidence_score !== undefined ? c.confidence_score.toFixed(3) : '1.000')} (${esc(c.confidence_tier || 'HIGH')})
+          </span>
+        </td>
+        <td>${provBadge} <small style="display:block; color:var(--drex-text-muted); font-size:10px; margin-top:2px;">${esc(provStr || 'Sector Inode')}</small></td>
+        <td><span class="badge badge-pass">${esc(c.validation_verdict || 'PASS')}</span></td>
+        <td>
+          ${!c.is_recovered
+            ? `<button class="action-btn" style="padding: 4px 8px; font-size: 11px; background: var(--drex-primary); color: #fff;" onclick="triggerCandidateExtract('${esc(c.candidate_id)}')">📥 Ingest to Vault</button>`
+            : `<span style="color:#168a4a; font-weight:600; font-size:11px;">✓ Vault Ingested</span>`
+          }
+        </td>
+      </tr>
+    `;
+  }).join('');
 }
 
 // 8. Raw File Carving Workbench
+function handleCarveSourceChange(newSource) {
+  const oldSource = STATE.selectedCarveSource;
+  if (oldSource && oldSource !== newSource) {
+    const alertBox = document.getElementById('carveSourceChangeAlert');
+    if (alertBox) {
+      alertBox.style.display = 'block';
+      const oldEl = document.getElementById('carveOldSourceLabel');
+      const newEl = document.getElementById('carveNewSourceLabel');
+      if (oldEl) oldEl.textContent = oldSource;
+      if (newEl) newEl.textContent = newSource;
+    }
+    STATE.carvingCandidates = [];
+    renderCarvedCandidatesList();
+  }
+  STATE.selectedCarveSource = newSource;
+}
+
 function renderCarving() {
+  const selectedSource = STATE.selectedCarveSource || (STATE.devices.length > 0 ? STATE.devices[0].device_path : 'tests/fixtures/sample_disk.img');
+  STATE.selectedCarveSource = selectedSource;
+
   return `
+    ${renderOperationalContextBar('RAW CARVING', selectedSource, 'M21 — Deep Sector Carving', 'IDLE')}
+
     <div class="card">
       <div class="section-label">METHOD 21 · DEEP SECTOR CARVING</div>
       <h2 class="card-title">Raw Sector Magic-Byte Carving Workbench</h2>
@@ -826,12 +941,16 @@ function renderCarving() {
         Deep bitstream carving engine validating file magic numbers, header/footer signatures, and structural containers across unallocated sector blocks.
       </p>
 
+      <div id="carveSourceChangeAlert" style="display: none; margin-top: 12px; padding: 10px 14px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 4px; font-size: 12px; color: #92400e;">
+        <strong>⚠ SOURCE CHANGED:</strong> Previous carve results belonged to <code id="carveOldSourceLabel">Source A</code>. New scan required for <code id="carveNewSourceLabel">Source B</code>.
+      </div>
+
       <div class="grid grid-3 mt-14" style="gap: 12px;">
         <div>
           <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">SOURCE TARGET / IMAGE</label>
-          <select id="carveTargetSelect" class="safety-input" style="margin-top: 4px; padding: 6px;">
-            ${STATE.devices.map(d => `<option value="${esc(d.device_path)}">${esc(d.model)} (${esc(d.device_path)})</option>`).join('')}
-            <option value="tests/fixtures/sample_disk.img" selected>tests/fixtures/sample_disk.img (Synthetic Fixture)</option>
+          <select id="carveTargetSelect" class="safety-input" style="margin-top: 4px; padding: 6px;" onchange="handleCarveSourceChange(this.value)">
+            ${STATE.devices.map(d => `<option value="${esc(d.device_path)}" ${d.device_path === selectedSource ? 'selected' : ''}>${esc(d.model)} (${esc(d.device_path)}) [${esc(d.bus_type)}]</option>`).join('')}
+            <option value="tests/fixtures/sample_disk.img" ${selectedSource === 'tests/fixtures/sample_disk.img' ? 'selected' : ''}>🧪 TEST FIXTURE (tests/fixtures/sample_disk.img)</option>
           </select>
         </div>
         <div>
@@ -864,7 +983,11 @@ function renderCarving() {
       <div class="section-label">DISCOVERED RAW CANDIDATES</div>
       <h3 class="card-title">Explainable 5-Factor Confidence Scoring</h3>
       <div id="carveCandidatesTable" style="margin-top: 12px;">
-        <p style="color: var(--drex-text-muted); font-size: 12px;">Select target and click <strong>Launch Raw Carve Engine</strong> to extract candidates.</p>
+        <div style="padding: 24px; text-align: center; background: var(--drex-bg-surface-subtle); border-radius: var(--drex-radius-md); border: 1px dashed var(--drex-border-base);">
+          <div style="font-size: 24px; margin-bottom: 8px;">🔍</div>
+          <p style="font-weight: 600; font-size: 13px;">NO RECOVERY RESULTS</p>
+          <p style="font-size: 11px; color: var(--drex-text-muted); margin-top: 4px;">No carve scan has been executed for this source yet. Click <strong>Launch Raw Carve Engine</strong> to extract candidates.</p>
+        </div>
       </div>
     </div>
   `;
@@ -955,9 +1078,17 @@ function renderCarvedCandidatesList() {
   if (!container) return;
   const cands = (STATE.carvingCandidates && STATE.carvingCandidates.length > 0) ? STATE.carvingCandidates : [];
   if (cands.length === 0) {
-    container.innerHTML = '<p style="color: var(--drex-text-muted); font-size: 12px;">No candidates discovered in recent scan.</p>';
+    container.innerHTML = `
+      <div style="padding: 24px; text-align: center; background: var(--drex-bg-surface-subtle); border-radius: var(--drex-radius-md); border: 1px dashed var(--drex-border-base);">
+        <div style="font-size: 24px; margin-bottom: 8px;">🔍</div>
+        <p style="font-weight: 600; font-size: 13px;">NO RECOVERY RESULTS</p>
+        <p style="font-size: 11px; color: var(--drex-text-muted); margin-top: 4px;">No candidates discovered for source ${esc(STATE.selectedCarveSource || '')}.</p>
+      </div>
+    `;
     return;
   }
+
+  const isFixtureSource = STATE.selectedCarveSource && STATE.selectedCarveSource.includes('fixture');
 
   container.innerHTML = `
     <div class="table-wrap">
@@ -965,6 +1096,7 @@ function renderCarvedCandidatesList() {
         <thead>
           <tr>
             <th>Candidate ID</th>
+            <th>Provenance</th>
             <th>Format</th>
             <th>Offset</th>
             <th>Size</th>
@@ -978,6 +1110,11 @@ function renderCarvedCandidatesList() {
           ${cands.map(c => `
             <tr>
               <td><code>${esc(c.candidate_id)}</code></td>
+              <td>
+                ${isFixtureSource
+                  ? '<span class="badge" style="background:#fef3c7; color:#92400e; font-size:9px;">🧪 TEST FIXTURE</span>'
+                  : '<span class="badge badge-pass" style="font-size:9px;">REAL EVIDENCE</span>'}
+              </td>
               <td><span class="badge" style="background:#eaf3ff; color:#1769e0; font-size:10px;">${esc(c.file_type)}</span></td>
               <td><code>0x${Number(c.offset || 0).toString(16).toUpperCase()}</code></td>
               <td>${formatBytes(c.size_bytes)}</td>
@@ -1008,8 +1145,90 @@ function renderCarvedCandidatesList() {
 }
 
 // 9. Out-of-Order Fragment Reconstruction
+function updateFragmentSourceDisplay() {
+  const preset = document.getElementById('fragPresetSelect')?.value || 'PNG_BI';
+  const displayBox = document.getElementById('fragInputCandidateDisplay');
+  if (!displayBox) return;
+
+  if (preset === 'PNG_BI') {
+    displayBox.innerHTML = `
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <div style="flex: 1; background: var(--drex-bg-surface); padding: 8px 12px; border: 1px solid var(--drex-border-base); border-radius: 4px;">
+          <div style="font-weight: 700; color: var(--drex-primary);">Chunk 1 (Header Extent)</div>
+          <div style="font-size: 10px; font-family: var(--drex-font-mono); color: var(--drex-text-muted); margin-top: 2px;">
+            Offset: <code>0x0000</code> &middot; Size: 33 Bytes &middot; Signature: <code>PNG Image (89 50 4E 47 ...)</code>
+          </div>
+        </div>
+        <div style="flex: 1; background: var(--drex-bg-surface); padding: 8px 12px; border: 1px solid var(--drex-border-base); border-radius: 4px;">
+          <div style="font-weight: 700; color: var(--drex-status-pass);">Chunk 2 (Footer Extent)</div>
+          <div style="font-size: 10px; font-family: var(--drex-font-mono); color: var(--drex-text-muted); margin-top: 2px;">
+            Offset: <code>0x1000</code> &middot; Size: 12 Bytes &middot; Signature: <code>IEND Trailer (49 45 4E 44 ...)</code>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top: 6px; font-size: 10px; color: var(--drex-text-muted);">
+        Candidate Set: <strong>CAND-SET-001 (PNG Bipartite Non-Contiguous Pair)</strong> &middot; 2 Non-Contiguous Chunks Identified
+      </div>
+    `;
+  } else if (preset === 'JPEG_TRI') {
+    displayBox.innerHTML = `
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <div style="flex: 1; background: var(--drex-bg-surface); padding: 8px 12px; border: 1px solid var(--drex-border-base); border-radius: 4px;">
+          <div style="font-weight: 700; color: var(--drex-primary);">Chunk 1 (SOI Header)</div>
+          <div style="font-size: 10px; font-family: var(--drex-font-mono); color: var(--drex-text-muted); margin-top: 2px;">
+            Offset: <code>0x0000</code> &middot; Size: 20 Bytes &middot; Signature: <code>FF D8 FF E0 (JFIF APP0)</code>
+          </div>
+        </div>
+        <div style="flex: 1; background: var(--drex-bg-surface); padding: 8px 12px; border: 1px solid var(--drex-border-base); border-radius: 4px;">
+          <div style="font-weight: 700; color: #8e44ad;">Chunk 2 (Quantization DQT)</div>
+          <div style="font-size: 10px; font-family: var(--drex-font-mono); color: var(--drex-text-muted); margin-top: 2px;">
+            Offset: <code>0x0800</code> &middot; Size: 67 Bytes &middot; Signature: <code>FF DB Quant Table</code>
+          </div>
+        </div>
+        <div style="flex: 1; background: var(--drex-bg-surface); padding: 8px 12px; border: 1px solid var(--drex-border-base); border-radius: 4px;">
+          <div style="font-weight: 700; color: var(--drex-status-pass);">Chunk 3 (EOI Trailer)</div>
+          <div style="font-size: 10px; font-family: var(--drex-font-mono); color: var(--drex-text-muted); margin-top: 2px;">
+            Offset: <code>0x2000</code> &middot; Size: 2 Bytes &middot; Signature: <code>FF D9 EOI Terminator</code>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top: 6px; font-size: 10px; color: var(--drex-text-muted);">
+        Candidate Set: <strong>CAND-SET-002 (JPEG Tripartite Stream)</strong> &middot; 3 Discontinuous Extent Blocks
+      </div>
+    `;
+  } else {
+    displayBox.innerHTML = `
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <div style="flex: 1; background: var(--drex-bg-surface); padding: 8px 12px; border: 1px solid var(--drex-border-base); border-radius: 4px;">
+          <div style="font-weight: 700; color: var(--drex-primary);">Chunk 1 (PDF Header)</div>
+          <div style="font-size: 10px; font-family: var(--drex-font-mono); color: var(--drex-text-muted); margin-top: 2px;">
+            Offset: <code>0x0000</code> &middot; Size: 15 Bytes &middot; Signature: <code>%PDF-1.4 Catalog</code>
+          </div>
+        </div>
+        <div style="flex: 1; background: var(--drex-bg-surface); padding: 8px 12px; border: 1px solid var(--drex-border-base); border-radius: 4px;">
+          <div style="font-weight: 700; color: var(--drex-status-pass);">Chunk 2 (EOF Trailer)</div>
+          <div style="font-size: 10px; font-family: var(--drex-font-mono); color: var(--drex-text-muted); margin-top: 2px;">
+            Offset: <code>0x1000</code> &middot; Size: 7 Bytes &middot; Signature: <code>%%EOF EOF Block</code>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top: 6px; font-size: 10px; color: var(--drex-text-muted);">
+        Candidate Set: <strong>CAND-SET-003 (PDF Multipartite Container)</strong> &middot; 2 Non-Contiguous Chunks Identified
+      </div>
+    `;
+  }
+}
+
 function renderFragments() {
+  const activeCaseId = getActiveCaseId();
+
+  setTimeout(() => {
+    updateFragmentSourceDisplay();
+  }, 50);
+
   return `
+    ${renderOperationalContextBar('FRAGMENT RECONSTRUCTION', 'CANDIDATE_STREAM', 'M22 — Fragment Reassembly', 'IDLE')}
+
     <div class="card">
       <div class="section-label">METHOD 22 · FRAGMENT RECONSTRUCTION</div>
       <h2 class="card-title">Non-Contiguous Fragment Reassembly Workbench</h2>
@@ -1017,11 +1236,18 @@ function renderFragments() {
         Assembles fragmented file chunks across non-contiguous clusters. Analyzes boundary seam continuity, validates internal structure, and detects overlapping extents.
       </p>
 
+      <div class="card mt-14" style="background: var(--drex-bg-surface-subtle); border: 1px solid var(--drex-border-base); padding: 12px;">
+        <div class="section-label">SOURCE / CANDIDATE FRAGMENT SET</div>
+        <div id="fragInputCandidateDisplay" style="margin-top: 8px;">
+          <!-- Dynamically updated by updateFragmentSourceDisplay -->
+        </div>
+      </div>
+
       <div class="grid grid-3 mt-14" style="gap: 12px;">
         <div>
           <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">FRAGMENT PROFILE PRESET</label>
-          <select id="fragPresetSelect" class="safety-input" style="margin-top: 4px; padding: 6px;">
-            <option value="PNG_BI">2-Fragment PNG Image (Header + IEND Footer)</option>
+          <select id="fragPresetSelect" class="safety-input" style="margin-top: 4px; padding: 6px;" onchange="updateFragmentSourceDisplay()">
+            <option value="PNG_BI" selected>2-Fragment PNG Image (Header + IEND Footer)</option>
             <option value="JPEG_TRI">3-Fragment JPEG JFIF Stream (SOI + SOS + EOI)</option>
             <option value="PDF_BI">2-Fragment PDF Document (Catalog + %%EOF)</option>
           </select>
@@ -1029,7 +1255,7 @@ function renderFragments() {
         <div>
           <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">TARGET CASE</label>
           <select id="fragCaseSelect" class="safety-input" style="margin-top: 4px; padding: 6px;">
-            ${STATE.cases.map(c => `<option value="${esc(c.case_id)}">${esc(c.case_number)} — ${esc(c.title)}</option>`).join('')}
+            ${STATE.cases.map(c => `<option value="${esc(c.case_id)}" ${c.case_id === activeCaseId ? 'selected' : ''}>${esc(c.case_number)} — ${esc(c.title || c.case_id)}</option>`).join('')}
           </select>
         </div>
         <div>
@@ -1145,7 +1371,7 @@ async function executeFragmentReassembly() {
         <div style="font-weight: 700; font-size: 13px;">✓ ${esc(res.validation_verdict)}: Reconstructed ${esc(res.file_type)} (${res.total_size_bytes} Bytes)</div>
         <div style="margin-top: 6px; font-size: 11px;">
           Candidate ID: <code>${esc(res.candidate_id)}</code> &middot; Reconstruction ID: <code>${esc(res.reconstruction_id)}</code><br>
-          Evidence Confidence: <strong>${res.reconstruction_confidence.toFixed(3)}</strong> &middot; Structural Validation: <strong>${res.is_valid_structure ? 'PASS' : 'PARTIAL'}</strong><br>
+          Target Case: <strong>${esc(caseId)}</strong> &middot; Evidence Confidence: <strong>${res.reconstruction_confidence.toFixed(3)}</strong> &middot; Structural Validation: <strong>${res.is_valid_structure ? 'PASS' : 'PARTIAL'}</strong><br>
           SHA-256 Digest: <code>${esc(res.sha256)}</code>
         </div>
         <div style="margin-top: 8px;">
@@ -1157,7 +1383,7 @@ async function executeFragmentReassembly() {
     showNotification({
       severity: 'PASS',
       title: 'FRAGMENT RECONSTRUCTED',
-      message: `Reconstructed ${res.file_type} (${res.total_size_bytes} bytes) with confidence ${res.reconstruction_confidence.toFixed(2)}`,
+      message: `Reconstructed ${res.file_type} (${res.total_size_bytes} bytes) with confidence ${res.reconstruction_confidence.toFixed(2)} for Case ${caseId}`,
       caseId: caseId,
       workflowId: 'fragments',
       methodId: 22,
@@ -1183,6 +1409,8 @@ async function executeFragmentReassembly() {
 // 10. Damaged Media & Bad Sector Mapfiles (Authentic Truth State)
 function renderDamagedMedia() {
   return `
+    ${renderOperationalContextBar('DAMAGED MEDIA', 'PHYSICAL_STORAGE', 'M24 — Damaged Media Imaging', 'BLOCKED / HW_REQUIRED')}
+
     <div class="card">
       <div class="section-label">METHOD 24 · DAMAGED MEDIA & BAD SECTOR RECOVERY</div>
       <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px; flex-wrap: wrap; gap: 8px;">
@@ -1229,6 +1457,8 @@ function renderDamagedMedia() {
 // 11. Live Hex & Byte Stream Inspector
 function renderHexInspector() {
   return `
+    ${renderOperationalContextBar('HEX INSPECTOR', 'LIVE_HEX_VIEWPORT', 'BYTE_STREAM_ANALYZER', 'IDLE')}
+
     <div class="card">
       <div class="section-label">LOW-LEVEL FORENSIC INSPECTOR</div>
       <h2 class="card-title">Live Hex Dump & Byte Stream Analyzer</h2>
@@ -1238,22 +1468,19 @@ function renderHexInspector() {
 
       <div class="grid grid-3 mt-14" style="gap: 12px;">
         <div>
-          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">PRESET SAMPLE STREAM</label>
+          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">🧪 SAMPLE / TEST DATA STREAM</label>
           <select id="hexPresetSelect" class="safety-input" style="margin-top: 4px; padding: 6px;" onchange="loadHexPreset()">
-            <option value="PNG">PNG Image (Magic Header + IHDR + IDAT + IEND)</option>
-            <option value="PDF">PDF 1.4 Document (Header + Obj + %%EOF)</option>
-            <option value="JPEG">JPEG JFIF Stream (SOI + APP0 + Quantization Table)</option>
-            <option value="SQLITE">SQLite 3 Database Header (Page Size 4096)</option>
-            <option value="ZERO">Zero-Wiped Block (64 Bytes 0x00)</option>
-            <option value="CSPRNG">CSPRNG Overwritten Random Block</option>
+            <option value="PNG">🧪 SAMPLE: PNG Image (Magic Header + IHDR + IDAT + IEND)</option>
+            <option value="PDF">🧪 SAMPLE: PDF 1.4 Document (Header + Obj + %%EOF)</option>
+            <option value="JPEG">🧪 SAMPLE: JPEG JFIF Stream (SOI + APP0 + Quantization Table)</option>
+            <option value="SQLITE">🧪 SAMPLE: SQLite 3 Database Header (Page Size 4096)</option>
+            <option value="ZERO">🧪 SAMPLE: Zero-Wiped Block (64 Bytes 0x00)</option>
+            <option value="CSPRNG">🧪 SAMPLE: CSPRNG Overwritten Random Block</option>
           </select>
         </div>
         <div>
-          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">BYTE VIEW MODE</label>
-          <select id="hexViewMode" class="safety-input" style="margin-top: 4px; padding: 6px;" onchange="renderHexDump()">
-            <option value="16" selected>16 Bytes per Row (Standard)</option>
-            <option value="32">32 Bytes per Row (Wide)</option>
-          </select>
+          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">📁 INSPECT LOCAL EVIDENCE FILE</label>
+          <input type="file" id="hexFileInput" class="safety-input" style="margin-top: 4px; padding: 4px; font-size: 11px;" onchange="loadHexFile(this)">
         </div>
         <div>
           <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">SHANNON ENTROPY</label>
@@ -1274,6 +1501,32 @@ function renderHexInspector() {
       <div id="hexDumpContainer" style="margin-top: 12px; overflow-x: auto;"></div>
     </div>
   `;
+}
+
+function loadHexFile(input) {
+  if (!input || !input.files || input.files.length === 0) return;
+  const file = input.files[0];
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const buffer = e.target.result;
+    const bytes = new Uint8Array(buffer.slice(0, 4096)); // First 4KB preview
+    let hexStr = '';
+    for (let i = 0; i < bytes.length; i++) {
+      hexStr += bytes[i].toString(16).padStart(2, '0').toUpperCase();
+    }
+    const rawInput = document.getElementById('hexRawInput');
+    if (rawInput) {
+      rawInput.value = hexStr;
+      renderHexDump();
+    }
+    showNotification({
+      severity: 'INFO',
+      title: 'FILE LOADED INTO HEX INSPECTOR',
+      message: `Loaded ${file.name} (${formatBytes(file.size)}) · Displaying first ${bytes.length} bytes`,
+      workflowId: 'hex_inspector',
+    });
+  };
+  reader.readAsArrayBuffer(file);
 }
 
 function loadHexPreset() {
@@ -1366,8 +1619,45 @@ function renderHexDump() {
 }
 
 // 12. NIST SP 800-88 Sanitization Planner
+function handlePlanTargetChange(targetPath) {
+  const mediaSelect = document.getElementById('planMediaTechSelect');
+  const overrideNotice = document.getElementById('planMediaOverrideNotice');
+  if (!mediaSelect) return;
+
+  // Auto-detect based on device capability
+  const dev = (STATE.devices || []).find(d => d.device_path === targetPath);
+  if (dev) {
+    const bus = (dev.bus_type || '').toUpperCase();
+    const model = (dev.model || '').toUpperCase();
+    if (bus.includes('NVME')) {
+      mediaSelect.value = 'NVME';
+    } else if (bus.includes('SSD') || model.includes('SSD') || model.includes('FLASH')) {
+      mediaSelect.value = 'FLASH_SSD';
+    } else if (bus.includes('USB') && !model.includes('SSD')) {
+      mediaSelect.value = 'FLASH_SSD';
+    } else if (bus.includes('OPTICAL') || bus.includes('CDROM')) {
+      mediaSelect.value = 'OPTICAL';
+    } else {
+      mediaSelect.value = 'MAGNETIC';
+    }
+    if (overrideNotice) overrideNotice.style.display = 'none';
+  } else {
+    // Unknown or logical target
+    if (overrideNotice) overrideNotice.style.display = 'none';
+  }
+}
+
+function handlePlanMediaOverride() {
+  const overrideNotice = document.getElementById('planMediaOverrideNotice');
+  if (overrideNotice) overrideNotice.style.display = 'inline-block';
+}
+
 function renderSanitizationPlanner() {
+  const selectedTarget = STATE.lastPlannedTarget || (STATE.devices.length > 0 ? STATE.devices[0].device_path : 'D:\\ForensicData\\TriageTarget.img');
+
   return `
+    ${renderOperationalContextBar('SANITIZATION PLANNER', selectedTarget, 'M01 — NIST SP 800-88 Clear/Purge', 'IDLE')}
+
     <div class="card">
       <div class="section-label">METHOD 01 & 12 · COMPLIANCE ENGINE</div>
       <h2 class="card-title">NIST SP 800-88 Rev. 2 Sanitization Planner</h2>
@@ -1378,14 +1668,17 @@ function renderSanitizationPlanner() {
       <div class="grid grid-3 mt-14" style="gap: 12px;">
         <div>
           <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">TARGET STORAGE MEDIA</label>
-          <select id="planTargetSelect" class="safety-input" style="margin-top: 4px; padding: 6px;">
-            ${STATE.devices.map(d => `<option value="${esc(d.device_path)}">${esc(d.model)} (${esc(d.device_path)}) [${esc(d.bus_type)}]</option>`).join('')}
-            <option value="D:\\ForensicData\\TriageTarget.img" selected>D:\\ForensicData\\TriageTarget.img (Logical Target)</option>
+          <select id="planTargetSelect" class="safety-input" style="margin-top: 4px; padding: 6px;" onchange="handlePlanTargetChange(this.value)">
+            ${STATE.devices.map(d => `<option value="${esc(d.device_path)}" ${d.device_path === selectedTarget ? 'selected' : ''}>${esc(d.model)} (${esc(d.device_path)}) [${esc(d.bus_type)}]</option>`).join('')}
+            <option value="D:\\ForensicData\\TriageTarget.img" ${selectedTarget === 'D:\\ForensicData\\TriageTarget.img' ? 'selected' : ''}>D:\\ForensicData\\TriageTarget.img (Logical Target)</option>
           </select>
         </div>
         <div>
-          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">MEDIA TECHNOLOGY</label>
-          <select id="planMediaTechSelect" class="safety-input" style="margin-top: 4px; padding: 6px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">MEDIA TECHNOLOGY</label>
+            <span id="planMediaOverrideNotice" class="badge badge-warn" style="display: none; font-size: 9px;">⚠ MANUAL OVERRIDE</span>
+          </div>
+          <select id="planMediaTechSelect" class="safety-input" style="margin-top: 4px; padding: 6px;" onchange="handlePlanMediaOverride()">
             <option value="MAGNETIC">Magnetic Hard Disk Drive (HDD)</option>
             <option value="FLASH_SSD" selected>Solid-State Drive / Flash Memory (SSD)</option>
             <option value="NVME">NVMe High-Speed Bus</option>
@@ -1441,7 +1734,14 @@ async function evaluateSanitizationPlan() {
         resultBox.style.color = '#065f46';
         resultBox.style.border = '1px solid #10b981';
         resultBox.innerHTML = `
-          <div style="font-weight: 700; font-size: 13px;">✓ Compliant Sanitization Plan Generated: ${esc(res.plan_id)}</div>
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div style="font-weight: 700; font-size: 13px;">✓ Sanitization Plan Generated: ${esc(res.plan_id)}</div>
+            <div style="display: flex; gap: 6px;">
+              <span class="badge badge-pass" style="font-size: 10px;">PLAN STATUS: READY</span>
+              <span class="badge" style="background:#f1f5f9; color:#475569; font-size: 10px;">EXECUTION: NOT STARTED</span>
+              <span class="badge" style="background:#f1f5f9; color:#475569; font-size: 10px;">VERIFICATION: NOT STARTED</span>
+            </div>
+          </div>
           <div class="grid grid-2 mt-12" style="font-size: 11px;">
             <div>
               <strong>Qualified Method:</strong> [Method ${res.qualified_method_id}] ${esc(res.qualified_method_name)}<br>
@@ -1453,7 +1753,7 @@ async function evaluateSanitizationPlan() {
             </div>
           </div>
           <div style="margin-top: 12px;">
-            <button class="action-btn" style="width: auto; padding: 6px 14px; font-size: 11px; background: var(--drex-status-fail); color: #fff;" onclick="openDestructiveConfirm(STATE.lastPlannedTarget, 'Storage Target')">Proceed to Drive Eraser →</button>
+            <button class="action-btn" style="width: auto; padding: 6px 14px; font-size: 11px; background: var(--drex-status-fail); color: #fff;" onclick="openDestructiveConfirm('${esc(res.target_path)}', 'Storage Target')">Proceed to Drive Eraser →</button>
           </div>
         `;
         STATE.lastPlannedTarget = res.target_path;
@@ -1497,6 +1797,8 @@ function renderDriveEraser() {
   }).join('');
 
   return `
+    ${renderOperationalContextBar('DRIVE ERASER', 'PHYSICAL_STORAGE', 'M01 — NIST SP 800-88 Clear', 'IDLE')}
+
     <div class="card">
       <div class="card-header">
         <div class="section-label">PRIVILEGED WORKSTATION OPERATION</div>
@@ -1521,6 +1823,59 @@ function handleDriveEraseByIndex(idx) {
 }
 
 // 14. File & Folder CSPRNG Shredder
+function handleFilePickerSelect(input) {
+  if (!input || !input.files || input.files.length === 0) return;
+  const file = input.files[0];
+  const targetPathInput = document.getElementById('shredTargetPath');
+  if (targetPathInput) {
+    targetPathInput.value = file.name;
+  }
+  updateSelectedTargetCard({
+    path: file.name,
+    type: 'FILE',
+    size: file.size,
+    count: 1,
+    readable: true,
+  });
+  updateFileShredderPreflight();
+}
+
+function handleFolderPickerSelect(input) {
+  if (!input || !input.files || input.files.length === 0) return;
+  const files = Array.from(input.files);
+  const folderName = files[0].webkitRelativePath ? files[0].webkitRelativePath.split('/')[0] : 'SelectedFolder';
+  let totalSize = 0;
+  files.forEach(f => totalSize += f.size);
+
+  const targetPathInput = document.getElementById('shredTargetPath');
+  if (targetPathInput) {
+    targetPathInput.value = folderName;
+  }
+  updateSelectedTargetCard({
+    path: folderName,
+    type: 'FOLDER',
+    size: totalSize,
+    count: files.length,
+    readable: true,
+  });
+  updateFileShredderPreflight();
+}
+
+function updateSelectedTargetCard({ path, type, size, count, readable }) {
+  const card = document.getElementById('shredSelectedTargetCard');
+  if (!card) return;
+  card.style.display = 'block';
+  card.innerHTML = `
+    <div style="font-weight: 700; color: var(--drex-primary); font-size: 12px; margin-bottom: 6px;">SELECTED TARGET METADATA</div>
+    <div class="grid grid-4" style="font-size: 11px; gap: 8px;">
+      <div><span style="color: var(--drex-text-muted);">Path:</span> <code style="word-break: break-all;">${esc(path)}</code></div>
+      <div><span style="color: var(--drex-text-muted);">Type:</span> <strong>${esc(type)}</strong></div>
+      <div><span style="color: var(--drex-text-muted);">Size:</span> <strong>${formatBytes(size)}</strong></div>
+      <div><span style="color: var(--drex-text-muted);">Files / Readable:</span> <strong>${count} File(s) · ${readable ? 'YES' : 'NO'}</strong></div>
+    </div>
+  `;
+}
+
 function renderFileEraser() {
   const fileMethods = (STATE.methodsRegistry && STATE.methodsRegistry.length > 0)
     ? STATE.methodsRegistry.filter(m => m.category === 'File/Folder Erasure' || (m.id >= 8 && m.id <= 16))
@@ -1552,6 +1907,8 @@ function renderFileEraser() {
   }, 50);
 
   return `
+    ${renderOperationalContextBar('FILE SHREDDER', STATE.selectedShredTarget || 'D:\\ForensicData\\sample_evidence.docx', 'M08 — CSPRNG Random Overwrite', 'IDLE')}
+
     <div class="card">
       <div class="section-label">METHOD 08–16 · LOGICAL OVERWRITE SHREDDER & SANITIZERS</div>
       <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px;">
@@ -1562,9 +1919,31 @@ function renderFileEraser() {
         Securely sanitizes logical files, directories, slack bytes, and container keys using standards-aligned algorithms (CSPRNG, NIST Clear, Slack Zero, Crypto Invalidation).
       </p>
 
+      <!-- Target Selection Mode -->
+      <div style="display: flex; gap: 14px; margin-top: 14px; align-items: center; background: var(--drex-bg-surface-subtle); padding: 10px 14px; border-radius: 4px;">
+        <span style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">TARGET TYPE:</span>
+        <label style="font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+          <input type="radio" name="shredTargetType" value="FILE" checked onchange="document.getElementById('shredFolderBtn').style.display='none'; document.getElementById('shredFileBtn').style.display='inline-block';">
+          <span>○ FILE</span>
+        </label>
+        <label style="font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+          <input type="radio" name="shredTargetType" value="FOLDER" onchange="document.getElementById('shredFileBtn').style.display='none'; document.getElementById('shredFolderBtn').style.display='inline-block';">
+          <span>○ FOLDER</span>
+        </label>
+        <div style="margin-left: auto; display: flex; gap: 8px;">
+          <input type="file" id="shredNativeFileInput" style="display: none;" onchange="handleFilePickerSelect(this)">
+          <input type="file" id="shredNativeFolderInput" webkitdirectory style="display: none;" onchange="handleFolderPickerSelect(this)">
+          <button id="shredFileBtn" class="action-btn" style="width: auto; padding: 4px 12px; font-size: 11px; background: var(--drex-primary); color: #fff;" onclick="document.getElementById('shredNativeFileInput').click()">[ Browse File ]</button>
+          <button id="shredFolderBtn" class="action-btn" style="width: auto; padding: 4px 12px; font-size: 11px; background: var(--drex-primary); color: #fff; display: none;" onclick="document.getElementById('shredNativeFolderInput').click()">[ Browse Folder ]</button>
+        </div>
+      </div>
+
+      <div id="shredSelectedTargetCard" class="card mt-12" style="background: var(--drex-bg-surface-subtle); border: 1px solid var(--drex-border-base); padding: 10px; display: none;">
+      </div>
+
       <div class="grid grid-3 mt-14" style="gap: 12px;">
         <div>
-          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">TARGET FILE OR DIRECTORY</label>
+          <label style="font-size: 11px; font-weight: 700; color: var(--drex-text-muted);">TARGET PATH</label>
           <input type="text" id="shredTargetPath" class="safety-input" style="margin-top: 4px; padding: 6px;" value="D:\\ForensicData\\IsolatedArtifacts\\sample_evidence.docx">
         </div>
         <div>
@@ -1743,6 +2122,8 @@ async function executeFileShredder() {
 // 15. Residue Analyzer & Slack Space Scrubber
 function renderResidueAnalyzer() {
   return `
+    ${renderOperationalContextBar('RESIDUE ANALYZER', 'FREE_SPACE / SLACK', 'M10/M13/M16 — Residue Scrubber', 'IDLE')}
+
     <div class="card">
       <div class="section-label">METHOD 10, 13 & 16 · FILE SLACK & FREE-SPACE PURGE</div>
       <h2 class="card-title">Filesystem Residue & Slack Space Analyzer</h2>
@@ -1780,8 +2161,22 @@ function renderResidueAnalyzer() {
 }
 
 // 16. Independent Schema 2.0 Verifier
+function handleVerifierFileSelect(input) {
+  if (!input || !input.files || input.files.length === 0) return;
+  const file = input.files[0];
+  const pathInput = document.getElementById('verifierPackagePath');
+  if (pathInput) {
+    pathInput.value = file.name;
+  }
+}
+
 function renderVerifier() {
+  const activeCase = STATE.activeCase;
+  const activeCaseLabel = activeCase ? `${activeCase.case_number} (${activeCase.title})` : 'NO ACTIVE CASE';
+
   return `
+    ${renderOperationalContextBar('INDEPENDENT VERIFIER', 'EVIDENCE_PACKAGE', 'SCHEMA_2.0_VERIFIER', 'IDLE')}
+
     <div class="card">
       <div class="card-header">
         <div class="section-label">OFFLINE STANDALONE VERIFICATION</div>
@@ -1790,14 +2185,81 @@ function renderVerifier() {
           Stateless verification engine executing independently from application state. Recomputes all SHA-256 digests, manifest integrity, and audit chain preimages.
         </p>
       </div>
-      <div style="border: 2px dashed var(--drex-border-strong); border-radius: var(--drex-radius-md); padding: 30px; text-align: center; background: var(--drex-bg-surface-subtle);">
-        <p style="font-size: 14px; font-weight: 600;">Drag & Drop Forensic Evidence Archive (.zip / .tar.gz)</p>
-        <p style="font-size: 11px; color: var(--drex-text-muted); margin-top: 4px;">Enforces ZipSlip pre-extraction safety validation and deterministic verdict precedence.</p>
-        <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff; padding: 8px 18px; margin-top: 14px;" onclick="runDemoPackageVerification()">⚡ Verify Demo Package (Schema 2.0)</button>
+
+      <!-- Real Evidence Package Verification -->
+      <div class="card mt-14" style="border: 1px solid var(--drex-border-base); background: var(--drex-bg-surface);">
+        <div class="section-label">OPERATIONAL EVIDENCE PACKAGE VERIFICATION</div>
+        <p style="font-size: 12px; color: var(--drex-text-muted); margin-top: 4px;">
+          Select an authentic sealed evidence archive (.zip / .tar.gz) from case vault to verify cryptographic integrity.
+        </p>
+        <div style="display: flex; gap: 10px; margin-top: 12px; align-items: center; flex-wrap: wrap;">
+          <input type="text" id="verifierPackagePath" class="safety-input" style="flex: 1; min-width: 240px; padding: 6px;" placeholder="Path to evidence package archive...">
+          <input type="file" id="verifierNativeFileInput" accept=".zip,.tar.gz" style="display: none;" onchange="handleVerifierFileSelect(this)">
+          <button class="action-btn" style="width: auto; background: var(--drex-bg-surface-subtle); color: var(--drex-text-main); border: 1px solid var(--drex-border-base); padding: 6px 14px;" onclick="document.getElementById('verifierNativeFileInput').click()">[ Browse Package ]</button>
+          <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff; padding: 6px 16px;" onclick="runIndependentPackageVerification()">🛡 Verify Evidence Package</button>
+        </div>
       </div>
+
+      <!-- Isolated Evaluation Demo Mode -->
+      <div class="card mt-14" style="border: 1px dashed var(--drex-border-strong); background: var(--drex-bg-surface-subtle);">
+        <div class="section-label">🎯 EVALUATION DEMO VERIFICATION</div>
+        <p style="font-size: 12px; color: var(--drex-text-muted); margin-top: 4px;">
+          Run verification against the deterministic embedded test fixture <code>DREX_EVIDENCE_PACKAGE_DEMO.zip</code>.
+        </p>
+        <button class="action-btn" style="width: auto; background: #8e44ad; color: #fff; padding: 6px 14px; margin-top: 10px;" onclick="runDemoPackageVerification()">⚡ Verify Evaluation Demo Package</button>
+      </div>
+
       <div id="verifierOutput" class="mt-16" style="display: none;"></div>
     </div>
   `;
+}
+
+async function runIndependentPackageVerification() {
+  const pathInput = document.getElementById('verifierPackagePath');
+  const packagePath = pathInput ? pathInput.value.trim() : '';
+  const out = document.getElementById('verifierOutput');
+  if (!out) return;
+
+  if (!packagePath) {
+    showNotification({
+      severity: 'WARN',
+      title: 'PACKAGE MISSING',
+      message: 'Please select or enter an evidence package archive path to verify.',
+      workflowId: 'verifier',
+    });
+    return;
+  }
+
+  out.style.display = 'block';
+  out.innerHTML = `<em>Running independent Schema 2.0 verification pipeline on '${esc(packagePath)}'...</em>`;
+
+  try {
+    const res = await api(`/api/verification/verify-package?package_path=${encodeURIComponent(packagePath)}`, { method: 'POST' });
+    const isPass = res.exit_code === 0 && res.verdict === 'VERIFIED';
+    out.innerHTML = `
+      <div style="background: ${isPass ? 'var(--drex-status-pass-soft)' : '#fef2f2'}; border: 1px solid ${isPass ? 'var(--drex-status-pass-border)' : '#ef4444'}; padding: 14px; border-radius: 4px;">
+        <strong style="color: ${isPass ? 'var(--drex-status-pass)' : 'var(--drex-status-fail)'}; font-size: 13px;">VERDICT: ${esc(res.verdict)} (Exit Code ${res.exit_code})</strong>
+        <p style="font-size: 11px; margin-top: 4px;">Package: <code>${esc(res.package_name)}</code> &middot; Schema: <strong>${esc(res.schema_version)}</strong></p>
+        <ul style="font-size: 11px; margin-top: 6px; padding-left: 18px;">
+          ${(res.details || []).map(d => `<li>${esc(d)}</li>`).join('')}
+        </ul>
+      </div>
+    `;
+    showNotification({
+      severity: isPass ? 'PASS' : 'FAIL',
+      title: 'INDEPENDENT VERIFICATION',
+      message: `Verdict: ${res.verdict} (Schema ${res.schema_version}) for ${res.package_name}`,
+      workflowId: 'verifier',
+    });
+  } catch (ex) {
+    out.innerHTML = `<span style="color: var(--drex-status-fail);">Verification Error: ${esc(ex.message)}</span>`;
+    showNotification({
+      severity: 'FAIL',
+      title: 'VERIFICATION ERROR',
+      message: ex.message,
+      workflowId: 'verifier',
+    });
+  }
 }
 
 // 17. Verification & Entropy Grid
@@ -2864,13 +3326,15 @@ function openDestructiveConfirm(devicePath, model) {
   box.innerHTML = `
     <div style="color: var(--drex-status-fail); font-weight: 800; font-size: 12px; letter-spacing: 0.08em;">⚠ CRITICAL DESTRUCTIVE OPERATION</div>
     <h3 style="font-size: 17px; margin: 4px 0 8px;">Confirm Storage Sanitization</h3>
+    <div id="confirmStateBadge" style="margin-bottom: 8px;"><span class="badge badge-warn" style="font-size: 10px;">CONFIRMATION_PENDING</span></div>
     <p style="font-size: 12px; color: var(--drex-text-muted);">
       Target Device: <strong>${esc(model || 'Physical Drive')} (<code>${esc(devicePath)}</code>)</strong>.<br>
       This will permanently overwrite addressable blocks. To proceed, enter the exact verification phrase below:
     </p>
     <div class="safety-phrase-box">${phrase}</div>
     <input type="text" id="safetyPhraseInput" class="safety-input" placeholder="Type exact phrase here..." autocomplete="off">
-    <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px;">
+    <div id="confirmErrorContainer" style="display: none; margin-top: 10px; padding: 10px; border-radius: 4px; font-size: 12px;"></div>
+    <div id="confirmActionButtons" style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px;">
       <button class="action-btn" style="width: auto; background: #e2e8f0; color: #334155;" onclick="closeModal()">Cancel</button>
       <button class="action-btn" style="width: auto; background: var(--drex-status-fail); color: #fff;" id="confirmEraseBtn" disabled>Execute Sanitization</button>
     </div>
@@ -2904,6 +3368,12 @@ async function submitSanitization(devicePath, methodId, phrase) {
     return;
   }
 
+  const confirmBtn = document.getElementById('confirmEraseBtn');
+  if (confirmBtn) {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Revalidating Target & Executing...';
+  }
+
   try {
     const res = await api('/api/sanitization/execute', {
       method: 'POST',
@@ -2930,6 +3400,39 @@ async function submitSanitization(devicePath, methodId, phrase) {
     closeModal();
     navigateTo('verification');
   } catch (ex) {
+    // Immediate state transition: CONFIRMATION_PENDING -> TARGET_REVALIDATION_FAILED
+    STATE.lastPlannedTarget = null;
+    STATE.pendingDestructiveTarget = null;
+
+    const badgeEl = document.getElementById('confirmStateBadge');
+    if (badgeEl) {
+      badgeEl.innerHTML = '<span class="badge badge-fail" style="font-size: 11px;">TARGET_REVALIDATION_FAILED</span>';
+    }
+
+    const errBox = document.getElementById('confirmErrorContainer');
+    if (errBox) {
+      errBox.style.display = 'block';
+      errBox.style.background = '#fef2f2';
+      errBox.style.color = '#991b1b';
+      errBox.style.border = '1px solid #ef4444';
+      errBox.innerHTML = `
+        <div style="font-weight: 700; font-size: 13px;">🔒 TARGET REVALIDATION FAILED</div>
+        <p style="margin-top: 4px; font-size: 11px;">Pre-execution TOCTOU safety validation failed. Target identity snapshot has been invalidated and destructive execution aborted.</p>
+        <div style="margin-top: 6px; font-family: var(--drex-font-mono); font-size: 10px;">${esc(ex.message)}</div>
+      `;
+    }
+
+    const phraseInput = document.getElementById('safetyPhraseInput');
+    if (phraseInput) phraseInput.disabled = true;
+
+    const actionsBox = document.getElementById('confirmActionButtons');
+    if (actionsBox) {
+      actionsBox.innerHTML = `
+        <button class="action-btn" style="width: auto; background: #e2e8f0; color: #334155;" onclick="closeModal()">Close</button>
+        <button class="action-btn" style="width: auto; background: var(--drex-primary); color: #fff;" onclick="closeModal(); loadInitialData(); navigateTo('device_manager');">↻ Re-detect / Re-qualify Devices</button>
+      `;
+    }
+
     showNotification({
       severity: 'FAIL',
       title: 'SANITIZATION BLOCKED',
