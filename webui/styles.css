@@ -976,3 +976,210 @@ button, input, select, textarea {
     display: none;
   }
 }
+
+/* ==========================================================================
+   PHASE 19.2 UX FUSION & FORENSIC WORKSTATION UX MAX STYLES
+   ========================================================================== */
+
+/* High-Density System Validation Stats Grid */
+.stat-box-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.stat-box {
+  background: var(--drex-bg-surface);
+  border: 1px solid var(--drex-border-base);
+  border-radius: var(--drex-radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-box .stat-label {
+  font-family: var(--drex-font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--drex-text-muted);
+}
+
+.stat-box .stat-val {
+  font-family: var(--drex-font-mono);
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--drex-primary);
+  margin-top: 4px;
+  line-height: 1.1;
+}
+
+.stat-box .stat-val.pass { color: var(--drex-status-pass); }
+.stat-box .stat-val.fail { color: var(--drex-status-fail); }
+.stat-box .stat-val.warn { color: var(--drex-status-warn); }
+
+.stat-box .stat-sub {
+  font-size: 10px;
+  color: var(--drex-text-muted);
+  margin-top: 3px;
+}
+
+/* Rich Recovered Artifact Cards Grid */
+.artifact-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.artifact-card {
+  background: var(--drex-bg-surface);
+  border: 1px solid var(--drex-border-base);
+  border-radius: var(--drex-radius-md);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.artifact-card:hover {
+  border-color: var(--drex-primary);
+  box-shadow: var(--drex-shadow-elevated);
+}
+
+.artifact-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.artifact-card-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--drex-radius-sm);
+  background: var(--drex-primary-soft);
+  color: var(--drex-primary);
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.artifact-card-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--drex-text-main);
+  word-break: break-all;
+  line-height: 1.3;
+}
+
+.artifact-card-meta {
+  font-size: 11px;
+  color: var(--drex-text-muted);
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.artifact-card-actions {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--drex-border-subtle);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Universal Source Picker Cards */
+.source-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.source-picker-card {
+  background: var(--drex-bg-surface);
+  border: 1.5px solid var(--drex-border-base);
+  border-radius: var(--drex-radius-md);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.source-picker-card:hover {
+  border-color: var(--drex-primary);
+  background: #fafcff;
+}
+
+.source-picker-card.selected {
+  border-color: var(--drex-primary);
+  background: var(--drex-primary-soft);
+  box-shadow: 0 0 0 1px var(--drex-primary);
+}
+
+.source-picker-card.locked {
+  border-color: #fecaca;
+  background: #fff5f5;
+  cursor: not-allowed;
+}
+
+/* Active Operations Panel */
+.operations-panel {
+  background: var(--drex-bg-surface);
+  border: 1px solid var(--drex-border-base);
+  border-radius: var(--drex-radius-md);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.operations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.operation-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--drex-bg-surface-subtle);
+  padding: 8px 12px;
+  border-radius: var(--drex-radius-sm);
+  border-left: 3px solid var(--drex-primary);
+  font-size: 12px;
+}
+
+/* Method Comparison Table */
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.compare-table th {
+  background: var(--drex-bg-surface-subtle);
+  padding: 8px 10px;
+  font-family: var(--drex-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--drex-text-muted);
+  border-bottom: 1px solid var(--drex-border-base);
+}
+
+.compare-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--drex-border-subtle);
+  vertical-align: middle;
+}
+

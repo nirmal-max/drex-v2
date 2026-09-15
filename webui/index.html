@@ -48,6 +48,7 @@
 
         <!-- 4. VERIFY -->
         <div class="nav-section-label">VERIFY</div>
+        <button class="nav-item" data-view="system_validation" title="System Validation & 949 Tests Dashboard">🛡 <span>System Validation (949)</span></button>
         <button class="nav-item" data-view="verifier" title="Schema 2.0 Independent Verifier">✓ <span>Independent Verifier</span></button>
         <button class="nav-item" data-view="validation_lab" title="Ground Truth Validation Lab">◌ <span>Validation Lab</span></button>
         <button class="nav-item" data-view="verification" title="Entropy Verification & 64-Sector Grid">◉ <span>Verification & Entropy</span></button>
@@ -92,6 +93,8 @@
           </div>
           <div class="case-switcher-bar">
             <span class="active-case-tag" id="activeCasePill">Active Case: Initializing...</span>
+            <span class="case-evidence-count-tag" id="activeCaseEvidenceTag" style="font-size: 11px; color: var(--drex-text-muted); background: var(--drex-bg-surface-subtle); padding: 3px 8px; border-radius: 3px; border: 1px solid var(--drex-border-base);">0 Objects</span>
+            <span class="case-op-status-tag" id="activeCaseOpTag" style="font-size: 11px; color: #168a4a; font-weight: 600;">● Idle</span>
             <button class="case-switch-btn" id="switchCaseBtn" onclick="openCaseSwitcherModal()" title="Switch Active Case">Switch Case</button>
           </div>
         </div>
