@@ -695,3 +695,295 @@ class BiFragmentGapSearch:
         combined = head_data + tail_data
         res = validator_fn(combined)
         return res.is_valid, res.state
+
+
+# ─── 7. Bounded Fragment Graph (Phase 16 Deepening) ──────────────────────────
+
+@dataclass
+class FragmentEdge:
+    """Directed edge between two fragment chunks with explainable evidence metrics."""
+    from_chunk_id: int
+    to_chunk_id: int
+    weight: float
+    offset_distance: int = 0
+    entropy_continuity: float = 0.0
+    byte_boundary_continuity: float = 0.0
+    format_constraint_passed: bool = True
+    sector_aligned: bool = True
+    evidence_breakdown: Dict[str, Any] = field(default_factory=dict)
+
+
+class FragmentGraph:
+    """
+    Bounded graph representation for non-contiguous fragment compatibility.
+    Constrains search space to prevent O(n^2) or combinatorial explosion on large fragment sets.
+    """
+
+    def __init__(
+        self,
+        max_nodes: int = 256,
+        max_edges_per_node: int = 16,
+        min_continuity_threshold: float = 0.15,
+    ):
+        self.max_nodes = max_nodes
+        self.max_edges_per_node = max_edges_per_node
+        self.min_continuity_threshold = min_continuity_threshold
+        self.chunks: Dict[int, FragmentChunk] = {}
+        self.edges: List[FragmentEdge] = []
+        self._adjacency: Dict[int, List[FragmentEdge]] = {}
+
+    def add_chunk(self, chunk: FragmentChunk) -> bool:
+        """Add a chunk node with capacity bounds checking."""
+        if len(self.chunks) >= self.max_nodes:
+            return False
+        self.chunks[chunk.chunk_id] = chunk
+        self._adjacency.setdefault(chunk.chunk_id, [])
+        return True
+
+    def build_graph(self, file_type: str = "raw") -> int:
+        """Build directed weighted compatibility edges between chunks."""
+        self.edges.clear()
+        self._adjacency = {cid: [] for cid in self.chunks}
+        chunk_list = list(self.chunks.values())
+        edge_count = 0
+
+        for i, src in enumerate(chunk_list):
+            if src.is_footer and not src.is_header:
+                # Footers cannot transition to further body chunks
+                continue
+
+            scored_targets: List[Tuple[float, FragmentChunk, Dict[str, Any]]] = []
+
+            for j, dst in enumerate(chunk_list):
+                if src.chunk_id == dst.chunk_id:
+                    continue
+                if dst.is_header and not dst.is_footer:
+                    # Non-leading headers cannot follow other chunks
+                    continue
+
+                # 1. Seam continuity score
+                seam = seam_continuity_score(src.data[-256:], dst.data[:256])
+                if seam < self.min_continuity_threshold:
+                    continue
+
+                # 2. Offset distance and sector alignment
+                dist = dst.offset - (src.offset + len(src.data))
+                sector_aligned = (dst.offset % 512 == 0)
+
+                # 3. Format constraint validation
+                fmt_valid = True
+                ft = file_type.lower()
+                if ft in ("jpeg", "jpg"):
+                    # Check for impossible markers (e.g. SOI following body)
+                    if dst.data.startswith(b"\xff\xd8"):
+                        fmt_valid = False
+                elif ft == "png":
+                    if dst.data.startswith(b"\x89PNG"):
+                        fmt_valid = False
+
+                # Composite edge weight: seam (0.60) + forward offset bonus (0.20) + sector alignment (0.20)
+                dist_factor = 1.0 if dist >= 0 else 0.5
+                align_factor = 1.0 if sector_aligned else 0.7
+                edge_weight = round((0.60 * seam) + (0.20 * dist_factor) + (0.20 * align_factor), 4)
+
+                evidence = {
+                    "seam_continuity": round(seam, 4),
+                    "offset_distance": dist,
+                    "sector_aligned": sector_aligned,
+                    "format_constraint": fmt_valid,
+                }
+                scored_targets.append((edge_weight, dst, evidence))
+
+            # Keep only top max_edges_per_node candidates
+            scored_targets.sort(key=lambda x: x[0], reverse=True)
+            for weight, dst, evidence in scored_targets[:self.max_edges_per_node]:
+                edge = FragmentEdge(
+                    from_chunk_id=src.chunk_id,
+                    to_chunk_id=dst.chunk_id,
+                    weight=weight,
+                    offset_distance=evidence["offset_distance"],
+                    entropy_continuity=evidence["seam_continuity"],
+                    byte_boundary_continuity=evidence["seam_continuity"],
+                    format_constraint_passed=evidence["format_constraint"],
+                    sector_aligned=evidence["sector_aligned"],
+                    evidence_breakdown=evidence,
+                )
+                self.edges.append(edge)
+                self._adjacency[src.chunk_id].append(edge)
+                edge_count += 1
+
+        return edge_count
+
+    def find_best_paths(self, max_paths: int = 3, max_length: int = 16) -> List[List[int]]:
+        """Find highest scoring paths starting from header chunks."""
+        headers = [c for c in self.chunks.values() if c.is_header]
+        if not headers:
+            headers = list(self.chunks.values())[:1] if self.chunks else []
+
+        all_paths: List[Tuple[float, List[int]]] = []
+
+        for h in headers:
+            # DFS with path score accumulation
+            stack: List[Tuple[List[int], float, Set[int]]] = [([h.chunk_id], 1.0, {h.chunk_id})]
+
+            while stack:
+                curr_path, curr_score, visited = stack.pop()
+                last_id = curr_path[-1]
+                last_chunk = self.chunks[last_id]
+
+                if last_chunk.is_footer or len(curr_path) >= max_length:
+                    all_paths.append((curr_score, curr_path))
+                    continue
+
+                outgoing = self._adjacency.get(last_id, [])
+                unvisited_out = [e for e in outgoing if e.to_chunk_id not in visited]
+
+                if not unvisited_out:
+                    all_paths.append((curr_score, curr_path))
+                    continue
+
+                for e in unvisited_out:
+                    next_score = curr_score * e.weight
+                    next_visited = visited | {e.to_chunk_id}
+                    stack.append((curr_path + [e.to_chunk_id], next_score, next_visited))
+
+        all_paths.sort(key=lambda x: x[0], reverse=True)
+        # Deduplicate paths
+        unique_paths: List[List[int]] = []
+        seen = set()
+        for score, p in all_paths:
+            t_p = tuple(p)
+            if t_p not in seen:
+                seen.add(t_p)
+                unique_paths.append(p)
+                if len(unique_paths) >= max_paths:
+                    break
+
+        return unique_paths
+
+
+# ─── 8. Multi-Source Candidate Fusion Engine (Phase 16 Deepening) ────────────
+
+@dataclass
+class FusedCandidateRecord:
+    """Unified candidate record combining evidence from multiple discovery sources."""
+    candidate_id: str
+    file_type: str
+    size_bytes: int
+    sha256: str
+    data: bytes = field(repr=False)
+    discovery_sources: List[str] = field(default_factory=list)
+    confidence_score: float = 0.0
+    confidence_factors: Dict[str, float] = field(default_factory=dict)
+    validation_state: CandidateState = CandidateState.CANDIDATE
+    provenance_details: Dict[str, Any] = field(default_factory=dict)
+    limitations: List[str] = field(default_factory=list)
+
+
+class CandidateFusionEngine:
+    """
+    Combines corroborating evidence from filesystem metadata, raw carving,
+    and fragment reconstruction without manufacturing confidence or overwriting provenance.
+    """
+
+    @classmethod
+    def fuse_candidates(
+        cls,
+        candidates: List[Any],
+        case_id: str = "CASE_DEFAULT",
+    ) -> List[FusedCandidateRecord]:
+        """Group candidates by SHA-256 / byte identity and fuse corroborating evidence."""
+        by_hash: Dict[str, List[Any]] = {}
+
+        for cand in candidates:
+            # Determine SHA-256 and payload
+            if hasattr(cand, "sha256") and cand.sha256:
+                h = cand.sha256
+            elif hasattr(cand, "output_hash") and cand.output_hash:
+                h = cand.output_hash
+            elif hasattr(cand, "data") and cand.data:
+                h = hashlib.sha256(cand.data).hexdigest()
+            elif hasattr(cand, "assembled_bytes") and cand.assembled_bytes:
+                h = hashlib.sha256(cand.assembled_bytes).hexdigest()
+            else:
+                continue
+
+            by_hash.setdefault(h, []).append(cand)
+
+        fused_list: List[FusedCandidateRecord] = []
+
+        for h, c_group in by_hash.items():
+            primary = c_group[0]
+            sources: Set[str] = set()
+            file_type = "UNKNOWN"
+            data = b""
+            state = CandidateState.CANDIDATE
+            base_conf = 0.5
+            limitations: List[str] = []
+            provenance: Dict[str, Any] = {"case_id": case_id, "corroborating_sources": []}
+
+            for c in c_group:
+                # Accumulate sources
+                if hasattr(c, "discovery_sources"):
+                    for s in c.discovery_sources:
+                        sources.add(s)
+                elif hasattr(c, "filesystem"):
+                    sources.add(f"FILESYSTEM_{c.filesystem.value if hasattr(c.filesystem, 'value') else c.filesystem}")
+                elif hasattr(c, "reconstruction_method"):
+                    sources.add(f"RECONSTRUCTION_{c.reconstruction_method}")
+                else:
+                    sources.add("CARVER")
+
+                if hasattr(c, "file_type") and c.file_type:
+                    file_type = str(c.file_type).upper()
+                if hasattr(c, "data") and c.data:
+                    data = c.data
+                elif hasattr(c, "assembled_bytes") and c.assembled_bytes:
+                    data = c.assembled_bytes
+
+                if hasattr(c, "state"):
+                    st = c.state if isinstance(c.state, CandidateState) else CandidateState(c.state) if hasattr(CandidateState, str(c.state)) else CandidateState.CANDIDATE
+                    if st in (CandidateState.RECOVERED_ARTIFACT, CandidateState.CONTENT_VALIDATED, CandidateState.STRUCTURALLY_VALID):
+                        state = st
+
+                if hasattr(c, "confidence") and c.confidence > base_conf:
+                    base_conf = c.confidence
+                elif hasattr(c, "evidence_confidence_score") and c.evidence_confidence_score > base_conf:
+                    base_conf = c.evidence_confidence_score
+
+                if hasattr(c, "limitations") and c.limitations:
+                    limitations.extend(c.limitations)
+
+            # Corroboration bonus: up to +0.10 for multi-engine corroboration
+            source_list = sorted(list(sources))
+            corrob_bonus = 0.05 * max(0, len(source_list) - 1)
+            final_conf = min(1.0, round(base_conf + corrob_bonus, 4))
+
+            conf_factors = {
+                "base_confidence": round(base_conf, 4),
+                "multi_source_corroboration": round(corrob_bonus, 4),
+                "source_count": len(source_list),
+            }
+
+            cid = getattr(primary, "candidate_id", f"FUSED-{h[:8].upper()}")
+            fused = FusedCandidateRecord(
+                candidate_id=cid,
+                file_type=file_type,
+                size_bytes=len(data),
+                sha256=h,
+                data=data,
+                discovery_sources=source_list,
+                confidence_score=final_conf,
+                confidence_factors=conf_factors,
+                validation_state=state,
+                provenance_details={
+                    "case_id": case_id,
+                    "discovery_sources": source_list,
+                    "group_candidate_count": len(c_group),
+                },
+                limitations=list(set(limitations)),
+            )
+            fused_list.append(fused)
+
+        fused_list.sort(key=lambda x: x.confidence_score, reverse=True)
+        return fused_list

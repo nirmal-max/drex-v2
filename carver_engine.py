@@ -89,7 +89,7 @@ class FragmentExtent:
 
 @dataclass
 class CarvedArtifact:
-    """Forensic Carved Artifact with full provenance and state tracking."""
+    """Forensic Carved Artifact with full provenance, multi-source fusion, and state tracking."""
     artifact_id: str
     file_type: str
     state: CandidateState
@@ -103,6 +103,8 @@ class CarvedArtifact:
     limitations: List[str] = field(default_factory=list)
     reconstruction_method: str = "CONTIGUOUS"
     member_statuses: Dict[str, MemberStatus] = field(default_factory=dict)
+    confidence_factors: Dict[str, float] = field(default_factory=dict)
+    discovery_sources: List[str] = field(default_factory=lambda: ["CARVER"])
 
 
 # ─── 2. FormatValidator Adapter Class (Preserved for compatibility) ──────────
@@ -190,8 +192,11 @@ class CarveConfig:
     sector_size: int = 512                 # 512 or 4096 byte sector alignment
     max_candidates: int = 1000             # Max candidate pool size
     max_file_size: int = 50 * 1024 * 1024  # 50 MB max single file size
+    max_scan_bytes: Optional[int] = None   # Max total bytes to scan
+    max_duration_seconds: float = 60.0     # Max execution timeout
     enabled_formats: Optional[List[str]] = None
     sector_aligned_only: bool = False      # If True, only search at sector boundaries
+    deduplicate_by_hash: bool = False      # If True, merge duplicates with identical SHA-256
 
 
 @dataclass
@@ -204,6 +209,8 @@ class CarveProgress:
     throughput_mb_s: float = 0.0
     is_complete: bool = False
     cancelled: bool = False
+    resource_limited: bool = False
+    limit_reason: Optional[str] = None
 
 
 # ─── 4. Streaming Carver Engine ──────────────────────────────────────────────
@@ -214,6 +221,12 @@ class DeepCarverEngine:
     def __init__(self, max_candidates: int = 500, config: Optional[CarveConfig] = None):
         self.max_candidates = max_candidates
         self.config = config or CarveConfig(max_candidates=max_candidates)
+
+    def carve_buffer(self, raw_buffer: bytes, max_candidates: Optional[int] = None) -> List[CarvedArtifact]:
+        """Carve artifacts directly from an in-memory byte buffer."""
+        if max_candidates is not None:
+            self.config.max_candidates = max_candidates
+        return self.carve_artifacts(raw_buffer)
 
     def carve(self, raw_buffer: bytes) -> List[CarvedCandidate]:
         """Carve candidates from an in-memory buffer (legacy interface)."""
@@ -247,6 +260,7 @@ class DeepCarverEngine:
         start_time = time.time()
         artifacts: List[CarvedArtifact] = []
         seen_ranges: Set[Tuple[int, int]] = set()
+        seen_hashes: Dict[str, CarvedArtifact] = {}
 
         # Handle ReadOnlySource or raw bytes
         if isinstance(source, (bytes, bytearray)):
@@ -262,6 +276,10 @@ class DeepCarverEngine:
 
         if total_size == 0:
             return []
+
+        # Enforce max scan bytes bound if configured
+        if self.config.max_scan_bytes is not None:
+            total_size = min(total_size, self.config.max_scan_bytes)
 
         window_size = self.config.window_size
         overlap_size = self.config.overlap_size
@@ -281,6 +299,12 @@ class DeepCarverEngine:
         while current_offset < total_size and len(artifacts) < self.config.max_candidates:
             if cancel_check and cancel_check():
                 progress.cancelled = True
+                break
+
+            # Check duration timeout bound
+            if time.time() - start_time > self.config.max_duration_seconds:
+                progress.resource_limited = True
+                progress.limit_reason = f"Execution duration exceeded limit ({self.config.max_duration_seconds}s)"
                 break
 
             chunk_len = min(window_size, total_size - current_offset)
@@ -322,6 +346,14 @@ class DeepCarverEngine:
                         actual_data = cand_buffer[:cand_len]
                         cand_hash = hashlib.sha256(actual_data).hexdigest()
 
+                        # Check cryptographic duplicate identity if configured
+                        if self.config.deduplicate_by_hash and cand_hash in seen_hashes:
+                            existing_art = seen_hashes[cand_hash]
+                            if "CARVER" not in existing_art.discovery_sources:
+                                existing_art.discovery_sources.append("CARVER")
+                            pos = idx + max(cand_len, len(sig))
+                            continue
+
                         artifact_id = f"CARVE-{format_id.upper()}-{global_offset:08X}"
                         extent = FragmentExtent(
                             start_offset=global_offset,
@@ -329,6 +361,14 @@ class DeepCarverEngine:
                             sequence_index=0,
                             sha256_hex=cand_hash,
                         )
+
+                        conf_factors = {
+                            "header_signature": round(0.30 * val_res.evidence.sig_match, 4),
+                            "structural_integrity": round(0.30 * val_res.evidence.structure, 4),
+                            "entropy_continuity": round(0.20 * val_res.evidence.continuity, 4),
+                            "metadata_consistency": round(0.10 * val_res.evidence.metadata, 4),
+                            "size_bounded": round(0.10 * val_res.evidence.size_bounded, 4),
+                        }
 
                         artifact = CarvedArtifact(
                             artifact_id=artifact_id,
@@ -343,10 +383,13 @@ class DeepCarverEngine:
                             metadata=val_res.metadata,
                             limitations=val_res.limitations,
                             member_statuses=val_res.member_statuses,
+                            confidence_factors=conf_factors,
+                            discovery_sources=["CARVER"],
                         )
 
                         artifacts.append(artifact)
                         seen_ranges.add((global_offset, global_offset + cand_len))
+                        seen_hashes[cand_hash] = artifact
                         pos = idx + max(cand_len, len(sig))
                     else:
                         pos = idx + len(sig)

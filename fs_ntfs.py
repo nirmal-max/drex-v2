@@ -19,6 +19,7 @@ from fs_base import (
     FilesystemKind,
     FsCandidateRecord,
     FsTimestamps,
+    MetadataSource,
     PathState,
     ReadOnlySource,
 )
@@ -202,6 +203,9 @@ class NtfsParser:
             parent_id=parent_ref,
             source_record_id=record_index,
             limitations=warnings,
+            metadata_source=MetadataSource.NTFS_MFT,
+            is_metadata_inferred=False,
+            fs_offset=self.mft_offset + (record_index * self.mft_record_size),
         )
 
     def read_candidate_bytes(self, candidate: FsCandidateRecord, max_bytes: Optional[int] = None) -> bytes:

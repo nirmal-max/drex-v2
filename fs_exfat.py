@@ -19,6 +19,7 @@ from fs_base import (
     FilesystemKind,
     FsCandidateRecord,
     FsTimestamps,
+    MetadataSource,
     PathState,
     ReadOnlySource,
 )
@@ -220,6 +221,9 @@ class ExfatParser:
                     parent_id=parent_path,
                     source_record_id=first_clus,
                     limitations=limitations,
+                    metadata_source=MetadataSource.EXFAT_DIRECTORY_ENTRY,
+                    is_metadata_inferred=(extent_state == ExtentState.HYPOTHETICAL_EXTENTS),
+                    fs_offset=self.cluster_to_byte_offset(first_clus) if first_clus >= 2 else None,
                 )
                 candidates.append(cand)
 

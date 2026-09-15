@@ -19,6 +19,7 @@ from fs_base import (
     FilesystemKind,
     FsCandidateRecord,
     FsTimestamps,
+    MetadataSource,
     PathState,
     ReadOnlySource,
 )
@@ -217,6 +218,9 @@ class Ext4Parser:
             timestamps=timestamps,
             source_record_id=inode_number,
             limitations=limitations,
+            metadata_source=MetadataSource.EXT_INODE,
+            is_metadata_inferred=False,
+            fs_offset=extents[0].physical_offset if extents else None,
         )
 
     def _parse_extent_tree(self, block_bytes: bytes) -> List[ExtentRun]:

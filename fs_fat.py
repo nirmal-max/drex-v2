@@ -19,6 +19,7 @@ from fs_base import (
     FilesystemKind,
     FsCandidateRecord,
     FsTimestamps,
+    MetadataSource,
     PathState,
     ReadOnlySource,
 )
@@ -308,6 +309,9 @@ class FatParser:
                 parent_id=parent_path,
                 source_record_id=start_clus,
                 limitations=limitations,
+                metadata_source=MetadataSource.FAT_DIRECTORY_ENTRY,
+                is_metadata_inferred=(extent_state == ExtentState.HYPOTHETICAL_EXTENTS),
+                fs_offset=self.cluster_to_byte_offset(start_clus) if start_clus >= 2 else None,
             )
             candidates.append(cand)
 

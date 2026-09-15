@@ -127,6 +127,17 @@ class FsTimestamps:
     deleted: Optional[str] = None
 
 
+class MetadataSource(str, Enum):
+    """Provenance origin of recovered filesystem metadata."""
+    NTFS_MFT = "NTFS_MFT"
+    FAT_DIRECTORY_ENTRY = "FAT_DIRECTORY_ENTRY"
+    EXFAT_DIRECTORY_ENTRY = "EXFAT_DIRECTORY_ENTRY"
+    EXT_INODE = "EXT_INODE"
+    CARVED = "CARVED"
+    INFERRED = "INFERRED"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass
 class FsCandidateRecord:
     """Forensic candidate metadata discovered during filesystem scanning."""
@@ -150,6 +161,9 @@ class FsCandidateRecord:
     evidence_vector: Dict[str, Any] = field(default_factory=dict)
     limitations: List[str] = field(default_factory=list)
     sha256: Optional[str] = None
+    metadata_source: MetadataSource = MetadataSource.UNKNOWN
+    is_metadata_inferred: bool = False
+    fs_offset: Optional[int] = None
 
 
 class ReadOnlySource(abc.ABC):

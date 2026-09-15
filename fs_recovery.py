@@ -103,8 +103,6 @@ class FilesystemRecoveryEngine:
     def validate_destination(cls, source_identifier: str, destination_dir: Union[str, Path]) -> Path:
         """Enforce strict destination safety interlocks."""
         dest_path = Path(destination_dir).resolve()
-        dest_path.mkdir(parents=True, exist_ok=True)
-
         # Collision prevention
         if os.path.exists(source_identifier):
             source_p = Path(source_identifier).resolve()
@@ -113,6 +111,7 @@ class FilesystemRecoveryEngine:
             if dest_path in source_p.parents or source_p in dest_path.parents:
                 raise ValueError("Destination collision: Source and Destination cannot be nested within each other")
 
+        dest_path.mkdir(parents=True, exist_ok=True)
         return dest_path
 
     @classmethod
@@ -227,6 +226,9 @@ class FilesystemRecoveryEngine:
             "is_deleted": candidate.is_deleted,
             "path_state": candidate.path_state.value,
             "extent_state": candidate.extent_state.value,
+            "metadata_source": candidate.metadata_source.value if hasattr(candidate.metadata_source, "value") else str(candidate.metadata_source),
+            "is_metadata_inferred": candidate.is_metadata_inferred,
+            "fs_offset": candidate.fs_offset,
             "declared_size": candidate.declared_size,
             "recovered_size": len(raw_bytes),
             "sha256": sha256_hash,

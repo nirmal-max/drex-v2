@@ -303,3 +303,89 @@ class DdrescueMapfile:
             current_pass=merged_pass,
             blocks=new_blocks,
         )
+
+
+# ─── Damaged Media Backend Adapter Architecture (Phase 16 Deepening) ─────────
+
+@dataclass
+class DamagedMediaExecutionResult:
+    """Execution status and forensic metadata for damaged media imaging operations."""
+    source_uri: str
+    destination_image_path: str
+    mapfile_path: str
+    status: str
+    rescued_bytes: int = 0
+    bad_bytes: int = 0
+    total_bytes: int = 0
+    rescued_percent: float = 0.0
+    read_only_source_verified: bool = True
+    hardware_accelerated: bool = False
+    backend_id: str = "GNU_DDRESCUE_CLEANROOM"
+    error_message: Optional[str] = None
+    limitations: List[str] = field(default_factory=list)
+
+
+class DamagedMediaAdapter:
+    """
+    Abstract adapter interface for future imaging backends (e.g. GNU ddrescue, hddsuperclone).
+    Strictly preserves read-only source media invariants and fails closed with BACKEND_UNAVAILABLE
+    unless real native binaries and qualifying physical hardware exist.
+    """
+
+    def __init__(
+        self,
+        source_uri: str,
+        destination_image_path: str,
+        mapfile_path: str,
+        max_retries: int = 3,
+        timeout_seconds: float = 300.0,
+    ):
+        self.source_uri = source_uri
+        self.destination_image_path = destination_image_path
+        self.mapfile_path = mapfile_path
+        self.max_retries = max_retries
+        self.timeout_seconds = timeout_seconds
+
+    def is_backend_available(self) -> bool:
+        """Query whether native imaging binary is present on host."""
+        return False  # Frozen baseline: GNU ddrescue not installed on host
+
+    def is_hardware_qualified(self) -> bool:
+        """Query whether source device is supported by controller pass-through."""
+        return False
+
+    def execute_imaging_pass(
+        self,
+        pass_number: int = 1,
+        reverse_direction: bool = False,
+    ) -> DamagedMediaExecutionResult:
+        """
+        Execute imaging pass.
+        Guarantees:
+          1. Source URI is strictly opened in READ_ONLY mode.
+          2. Destination image is completely separated from source.
+          3. If native tool missing -> returns BACKEND_UNAVAILABLE / HARDWARE_REQUIRED.
+        """
+        if not self.is_backend_available() or not self.is_hardware_qualified():
+            return DamagedMediaExecutionResult(
+                source_uri=self.source_uri,
+                destination_image_path=self.destination_image_path,
+                mapfile_path=self.mapfile_path,
+                status="BACKEND_UNAVAILABLE / HARDWARE_REQUIRED",
+                read_only_source_verified=True,
+                hardware_accelerated=False,
+                error_message="Native ddrescue binary or direct controller pass-through unavailable on host.",
+                limitations=[
+                    "Physical damaged-media recovery requires native GNU ddrescue or hardware write-blocker.",
+                    "Source media write operations strictly prohibited by DREX read-only safety policy.",
+                ],
+            )
+
+        # Future operational execution path
+        return DamagedMediaExecutionResult(
+            source_uri=self.source_uri,
+            destination_image_path=self.destination_image_path,
+            mapfile_path=self.mapfile_path,
+            status="COMPLETED",
+            read_only_source_verified=True,
+        )
