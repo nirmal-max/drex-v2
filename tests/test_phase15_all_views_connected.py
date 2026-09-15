@@ -60,8 +60,8 @@ def test_02_zero_placeholder_pages_in_app_js():
     assert "AUTHENTICATED REAL CONTRACT" not in code, "Generic placeholder text must not exist in app.js"
 
 
-def test_03_all_25_views_registered_in_view_titles():
-    """Verify all 25+ view IDs are mapped in VIEW_TITLES."""
+def test_03_all_26_views_registered_in_view_titles():
+    """Verify all 26 view IDs are mapped in VIEW_TITLES."""
     app_js_path = pathlib.Path("webui/app.js")
     code = app_js_path.read_text(encoding="utf-8")
 

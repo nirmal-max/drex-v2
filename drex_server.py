@@ -70,6 +70,7 @@ from forensic_vault import (
     RecoveryCandidateState,
     RecoveryArtifactRecord,
     VaultObjectType,
+    AuditVerificationStatus,
 )
 from hardware_storage import (
     DeviceIntelligenceEngine,
@@ -758,12 +759,13 @@ def backup_case(
         backup_path = os.path.join(b_dir, f"{case_id}_backup_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S')}.zip")
 
     try:
-        res = case_manager.create_case_backup(case_id, backup_path)
+        archive_path, archive_sha256 = case_manager.create_case_backup(case_id, backup_path)
+        manifest_path = str(Path(archive_path).parent / f"{Path(archive_path).stem}.manifest.json")
         return models.CaseBackupResponse(
             case_id=case_id,
-            backup_path=res["backup_path"],
-            manifest_path=res["manifest_path"],
-            archive_sha256=res["archive_sha256"],
+            backup_path=str(archive_path),
+            manifest_path=manifest_path,
+            archive_sha256=archive_sha256,
             status="BACKUP_COMPLETED",
         )
     except Exception as e:
@@ -777,14 +779,15 @@ def restore_case(
 ):
     """Restore and cryptographically verify a sealed case backup archive."""
     try:
-        res = case_manager.restore_case_backup(req.backup_zip_path, req.target_cases_dir)
+        restored_case = case_manager.restore_case_backup(req.backup_zip_path)
+        v_res = case_manager.verify_case_audit_chain(restored_case.case_id)
         return models.CaseRestoreResponse(
-            case_id=res["case_id"],
-            restored_path=res["restored_path"],
-            audit_chain_valid=res["audit_chain_valid"],
+            case_id=restored_case.case_id,
+            restored_path=str(case_manager._case_path(restored_case.case_id)),
+            audit_chain_valid=(v_res.status == AuditVerificationStatus.VALID),
             status="RESTORE_COMPLETED",
         )
-    except ValueError as ve:
+    except (ValueError, FileNotFoundError) as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Restore failed: {str(e)}")
@@ -811,14 +814,14 @@ def list_evidence(case_id: Optional[str] = None, current_user: Dict[str, Any] = 
             models.EvidenceItemRecord(
                 evidence_id=it.evidence_id,
                 case_id=it.case_id,
-                name=it.device_model or it.source_path,
+                name=getattr(it, "model", None) or getattr(it, "device_model", None) or it.source_path,
                 source_type=it.source_type.value if hasattr(it.source_type, "value") else str(it.source_type),
                 source_path=it.source_path,
-                size_bytes=it.capacity_bytes,
+                size_bytes=getattr(it, "capacity", 0) or getattr(it, "capacity_bytes", 0) or 0,
                 sha256_hash=it.source_hash or "",
-                custodian=it.added_by,
-                created_utc=it.added_at,
-                is_sealed=it.read_only_verified,
+                custodian=getattr(it, "examiner", "Analyst") or getattr(it, "added_by", "Analyst"),
+                created_utc=getattr(it, "acquisition_timestamp", "") or getattr(it, "added_at", ""),
+                is_sealed=getattr(it, "read_only", True),
             )
         )
     return out
@@ -1347,24 +1350,25 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
             detail=f"Confirmation phrase mismatch. Expected '{expected_phrase}', received '{req.safety_phrase_entered}'.",
         )
 
-    # 3. Pre-Execution Revalidation (TOCTOU guard)
-    sim_desc = getattr(req, "simulated_descriptor", None)
-    if not sim_desc and "PhysicalDrive" in req.target_path:
-        m = re.search(r"PhysicalDrive(\d+)", req.target_path, re.IGNORECASE)
-        d_num = int(m.group(1)) if m else 99
-        sim_desc = {"disk_number": d_num, "vendor_id": "SyntheticVendor", "serial_number": f"SYN-SN-{d_num:03d}"}
-    try:
-        snap = DeviceIntelligenceEngine.create_snapshot(req.target_path, simulated_descriptor=sim_desc)
-        is_val, err_reason, _ = PreExecutionRevalidator.revalidate(snap, req.target_path, simulated_descriptor=sim_desc)
-        if not is_val:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"TOCTOU REVALIDATION FAILED: {err_reason}",
-            )
-    except HTTPException:
-        raise
-    except Exception:
-        pass
+    # 3. Pre-Execution Revalidation (TOCTOU guard for physical/device targets)
+    if "PhysicalDrive" in req.target_path or req.target_path.startswith("\\\\.\\"):
+        sim_desc = getattr(req, "simulated_descriptor", None)
+        if not sim_desc and "PhysicalDrive" in req.target_path:
+            m = re.search(r"PhysicalDrive(\d+)", req.target_path, re.IGNORECASE)
+            d_num = int(m.group(1)) if m else 99
+            sim_desc = {"disk_number": d_num, "vendor_id": "SyntheticVendor", "serial_number": f"SYN-SN-{d_num:03d}"}
+        try:
+            snap = DeviceIntelligenceEngine.create_snapshot(req.target_path, simulated_descriptor=sim_desc)
+            is_val, err_reason, _ = PreExecutionRevalidator.revalidate(snap, req.target_path, simulated_descriptor=sim_desc)
+            if not is_val:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"TOCTOU REVALIDATION FAILED: {err_reason}",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
 
     # 4. Duplicate Operation Fingerprinting (Destructive operation 409 rejection)
     fp = compute_operation_fingerprint(

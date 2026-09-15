@@ -907,9 +907,9 @@ class DeviceIntelligenceEngine:
         sys_drive = os.environ.get("SystemDrive", "C:").upper().rstrip("\\")
         if not sys_drive.endswith(":"):
             sys_drive = f"{sys_drive}:"
-        if dev_upper.startswith(f"\\\\.\\{sys_drive}") or dev_upper == sys_drive:
+        if dev_upper.startswith(f"\\\\.\\{sys_drive}") or dev_upper == sys_drive or dev_upper.startswith(f"{sys_drive}\\") or dev_upper.startswith(f"{sys_drive}/"):
             return True
-        if dev_upper.startswith(r"\\.\C:") or dev_upper in ("C:", "C:\\"):
+        if dev_upper.startswith(r"\\.\C:") or dev_upper.startswith("C:") or dev_upper in ("C:", "C:\\"):
             return True
 
         # Conservative fallback if no system disk numbers were detected
