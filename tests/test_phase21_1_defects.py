@@ -154,7 +154,7 @@ def test_v05_case_isolation_during_demo_loop(client, auth_headers):
 # ─── SECTION 4: V06 & V07 — EVIDENCE AGGREGATION & CERTIFICATE VERIFICATION ───
 
 def test_v06_evidence_aggregation_across_cases(client, auth_headers):
-    """Verify GET /api/evidence without case_id returns artifacts across all cases rather than an empty list."""
+    """Verify GET /api/evidence enforces case isolation and fails closed when case_id is omitted."""
     from forensic_vault import EvidenceSourceType
     c1 = case_manager.create_case(case_number=f"EVAL-EV1-{int(time.time())}", title="Case 1", examiner="Analyst 1", organization="Forensic Lab")
     case_manager.register_evidence(
@@ -165,11 +165,24 @@ def test_v06_evidence_aggregation_across_cases(client, auth_headers):
         capacity=1024,
     )
 
-    res = client.get("/api/evidence", headers=auth_headers)
-    assert res.status_code == 200
-    items = res.json()
+    # 1. Without case_id, fail-closed to empty list to preserve cross-case privacy
+    res_default = client.get("/api/evidence", headers=auth_headers)
+    assert res_default.status_code == 200
+    assert res_default.json() == []
+
+    # 2. With specific case_id, return case-specific evidence
+    res_scoped = client.get(f"/api/evidence?case_id={c1.case_id}", headers=auth_headers)
+    assert res_scoped.status_code == 200
+    items = res_scoped.json()
     assert isinstance(items, list)
     assert len(items) > 0
+    assert all(it["case_id"] == c1.case_id for it in items)
+
+    # 3. Explicit all_cases=true auditor mode aggregates
+    res_all = client.get("/api/evidence?all_cases=true", headers=auth_headers)
+    assert res_all.status_code == 200
+    all_items = res_all.json()
+    assert len(all_items) >= len(items)
 
 
 def test_v07_certificate_verification_and_tamper_detection(client, auth_headers):

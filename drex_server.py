@@ -623,10 +623,29 @@ class JobRegistry:
         self._atomic_write(target_file, record)
 
     def _atomic_write(self, target_file: pathlib.Path, data: Dict[str, Any]) -> None:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
         tmp_file = target_file.parent / f"{target_file.name}.tmp.{uuid.uuid4().hex[:6]}"
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        os.replace(tmp_file, target_file)
+
+        # Windows-safe atomic replace with retry loop for transient locks
+        for attempt in range(5):
+            try:
+                os.replace(tmp_file, target_file)
+                return
+            except (PermissionError, OSError):
+                if attempt == 4:
+                    try:
+                        with open(target_file, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2)
+                    finally:
+                        try:
+                            if tmp_file.exists():
+                                tmp_file.unlink()
+                        except Exception:
+                            pass
+                    return
+                time.sleep(0.02)
 
     def _load_job_from_disk(self, job_id: str) -> Optional[Dict[str, Any]]:
         safe_job = re.sub(r'[^a-zA-Z0-9_\-]', '_', job_id)
@@ -1096,17 +1115,28 @@ def restore_case(
 # ─── Evidence Vault Endpoints ─────────────────────────────────────────────────
 
 @app.get("/api/evidence", response_model=List[models.EvidenceItemRecord])
-def list_evidence(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(require_permission("evidence:read"))):
-    """List isolated evidence artifacts in the Evidence Vault for the specified case or all cases."""
+def list_evidence(
+    case_id: Optional[str] = None,
+    all_cases: bool = False,
+    current_user: Dict[str, Any] = Depends(require_permission("evidence:read")),
+):
+    """List isolated evidence artifacts in the Evidence Vault for the specified case.
+
+    FORENSIC ISOLATION INVARIANT:
+    If case_id is omitted and all_cases is False, returns empty list [] (fail closed)
+    to preserve forensic case isolation and prevent cross-case contamination.
+    """
     target_case_ids = []
     if case_id:
         if case_manager.get_case(case_id):
             target_case_ids.append(case_id)
-    else:
+    elif all_cases:
         try:
             target_case_ids = [c.case_id for c in case_manager.list_cases()]
         except Exception:
             target_case_ids = []
+    else:
+        return []
 
     out = []
     seen_ids = set()

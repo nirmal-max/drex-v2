@@ -1,0 +1,185 @@
+{
+  "PHASE_1": {
+    "title": "REPOSITORY INTEGRITY",
+    "status": "PROVEN",
+    "evidence": {
+      "HEAD": "1988f3965731ad2e9849f639dbe36772c05f4856",
+      "status": "modified: M drex_data/test_results.json\n M drex_server.py\n M tests/test_phase21_1_defects.py\n?? scripts/phase21_2_audit_results.json\n?? scripts/phase21_2_independent_audit.py",
+      "branch": "* main 1988f39 [origin/main] feat: complete drex v2 adversarial runtime qualification",
+      "remote": "origin\thttps://github.com/nirmal-max/drex-v2.git (fetch)\norigin\thttps://github.com/nirmal-max/drex-v2.git (push)",
+      "junction_root": "D:\\drex-v2-main"
+    }
+  },
+  "PHASE_3": {
+    "title": "TEST LEDGER PROVENANCE",
+    "status": "PROVEN",
+    "evidence": {
+      "json_exists": true,
+      "json_total_tests": null,
+      "json_passed": 977,
+      "json_commit": "1988f39",
+      "json_timestamp": null,
+      "api_status": 200,
+      "api_total_tests": null,
+      "api_passed": 977,
+      "api_commit": "1988f39"
+    }
+  },
+  "PHASE_4": {
+    "title": "RUNTIME VERSION TRUTH",
+    "status": "PROVEN",
+    "evidence": {
+      "api_version_status": 200,
+      "backend_version": "2.0.0",
+      "git_commit": "1988f39",
+      "build_id": "1988f39",
+      "environment": "Windows 11 (AMD64)",
+      "spa_index_status": 200
+    }
+  },
+  "PHASE_5": {
+    "title": "V01 FILE TARGET PATH NORMALIZATION",
+    "status": "PROVEN",
+    "evidence": {
+      "std_path": "D:\\ForensicData\\sample.docx",
+      "whitespace_path": "D:\\Forensic Data\\sample file.docx",
+      "unicode_path": "D:\\ForensicData\\test_unicode.dat",
+      "c_drive": "C:\\test.txt",
+      "d_drive": "D:\\test.txt",
+      "relative_drive_normalized": "D:\\test.txt",
+      "api_inspection_status": 200,
+      "api_path": "D:\\Forensic Data\\sample file.docx",
+      "api_type": "FILE"
+    }
+  },
+  "PHASE_6": {
+    "title": "V02 PHYSICAL DEVICE NORMALIZATION",
+    "status": "PROVEN",
+    "evidence": {
+      "canonical_pd0": "\\\\.\\PhysicalDrive0",
+      "canonical_pd1": "\\\\.\\PhysicalDrive1",
+      "forward_slash_pd0": "\\\\.\\PhysicalDrive0",
+      "lowercase_pd0": "\\\\.\\PhysicalDrive0"
+    }
+  },
+  "PHASE_7": {
+    "title": "V03 DEVICE NAMESPACE SEPARATION",
+    "status": "PROVEN",
+    "evidence": {
+      "file_namespace": "FILE",
+      "dir_namespace": "DIRECTORY",
+      "volume_namespace": "VOLUME",
+      "physical_device_namespace": "PHYSICAL_DEVICE"
+    }
+  },
+  "PHASE_8": {
+    "title": "V04/V05 CASE & NOTIFICATION ISOLATION",
+    "status": "PROVEN",
+    "evidence": {
+      "case_a_id": "CASE-20260916-71AAE789",
+      "case_b_id": "CASE-20260916-F6D0ED31",
+      "case_a_timeline_count": 1,
+      "case_b_timeline_count": 1
+    }
+  },
+  "PHASE_10": {
+    "title": "V06 EVIDENCE VAULT CASE ISOLATION",
+    "status": "PROVEN",
+    "evidence": {
+      "unscoped_status": 200,
+      "unscoped_items_count": 0,
+      "scoped_a_status": 200,
+      "scoped_a_items_count": 0
+    }
+  },
+  "PHASE_11": {
+    "title": "V07 CERTIFICATE VERIFICATION & TAMPER DETECTION",
+    "status": "PROVEN",
+    "evidence": {
+      "demo_flow_status": 200,
+      "cert_id": "CERT-DREX-59E0EBA980B6",
+      "case_id": "CASE-20260916-6AF8EE62",
+      "valid_cert_verify_status": 200,
+      "valid_cert_is_valid": true,
+      "valid_cert_verdict": "PASS \u2014 Attestation Cryptographically Verified",
+      "pdf_status": 200,
+      "pdf_bytes": 3601,
+      "pdf_header": "%PDF",
+      "tampered_cert_verify_status": 200,
+      "tampered_cert_is_valid": false
+    }
+  },
+  "PHASE_12": {
+    "title": "V08/V09 RECOVERY & FRAGMENT RECONSTRUCTION",
+    "status": "PROVEN",
+    "evidence": {
+      "reconstructed_candidates_count": 1,
+      "shannon_entropy": 4.0378,
+      "seam_score": 0.5397,
+      "ground_truth_hash": "3bb70b0e25b534039134a7e8e6afae20d299eaec2c833d4789ce923994467cbf",
+      "top_candidate_valid": true,
+      "top_candidate_size": 2572
+    }
+  },
+  "PHASE_16": {
+    "title": "V13 SYSTEM DISK SAFETY TRIPWIRE",
+    "status": "PROVEN",
+    "evidence": {
+      "c_windows_blocked": true,
+      "c_root_blocked": true,
+      "pd0_blocked": true,
+      "c_program_files_blocked": true
+    }
+  },
+  "PHASE_18": {
+    "title": "NATIVE FILE & FOLDER PICKERS",
+    "status": "PROVEN",
+    "evidence": {
+      "file_inspection_status": 200,
+      "file_type": "FILE",
+      "dir_inspection_status": 200,
+      "dir_type": "FOLDER",
+      "dir_file_count": 176
+    }
+  },
+  "PHASE_20": {
+    "title": "FILE & FOLDER ERASURE E2E WITH TOCTOU PROTECTION",
+    "status": "PROVEN",
+    "evidence": {
+      "file_erased": true,
+      "file_verified": true,
+      "dir_files_wiped": 2,
+      "dir_all_success": true
+    }
+  },
+  "PHASE_23": {
+    "title": "25-METHOD MATRIX TRUTH (M01-M25)",
+    "status": "PROVEN",
+    "evidence": {
+      "registry_status": 200,
+      "total_methods_registered": 25,
+      "software_methods_count": 25,
+      "hardware_methods_count": 0
+    }
+  },
+  "PHASE_26": {
+    "title": "HASH-CHAIN TERMINOLOGY ACCURACY",
+    "status": "PROVEN",
+    "evidence": {
+      "hash_linked_ledger_references": 36
+    }
+  },
+  "PHASE_27": {
+    "title": "JUDGE MODES A & B AND FAILURE INJECTION",
+    "status": "PROVEN",
+    "evidence": {
+      "mode_a_status": 200,
+      "mode_a_synthetic_label": true,
+      "mode_a_case_number": "EVAL-20260916-2B0D",
+      "mode_b_status": 200,
+      "mode_b_certificate_id": "CERT-DREX-5714E1C2DE7B",
+      "mode_b_entropy": null,
+      "mode_b_recovered_hash": null
+    }
+  }
+}
