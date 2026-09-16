@@ -602,7 +602,7 @@ function openMethodComparisonModal() {
     { cat: 'REC', id: 'M20', name: 'TSK Directory Tree Recovery', speed: 'Moderate (~15s per GB)', coverage: 'Full Inode & MFT B-Tree Walk', hwReq: 'libtsk3 / pytsk3 Engine', risk: 'NONE (Read-Only)', ver: 'Filesystem Inode Validation' },
     { cat: 'REC', id: 'M21', name: 'Raw Sector Carving', speed: 'Deep Scan (~50 MB/s)', coverage: 'All Unallocated Clusters', hwReq: 'Raw Sector Access', risk: 'NONE (Read-Only)', ver: 'Header/Footer Signature & Size' },
     { cat: 'REC', id: 'M22', name: 'Fragment Reconstruction', speed: 'Heuristic (~20 MB/s)', coverage: 'Discontinuous Non-Contiguous Blocks', hwReq: 'Entropy Gradient Engine', risk: 'NONE (Read-Only)', ver: 'Structural & Seam Validation' },
-    { cat: 'REC', id: 'M25', name: 'Forensic Vault Recovery', speed: 'Fast (~200 MB/s)', coverage: 'Direct Ingest + SHA-256 Sealing', hwReq: 'Evidence Vault Storage', risk: 'NONE (Read-Only)', ver: 'Immutable Merkle Hash Chain' },
+    { cat: 'REC', id: 'M25', name: 'Forensic Vault Recovery', speed: 'Fast (~200 MB/s)', coverage: 'Direct Ingest + SHA-256 Sealing', hwReq: 'Evidence Vault Storage', risk: 'NONE (Read-Only)', ver: 'Immutable SHA-256 Hash Chain' },
   ];
 
   box.innerHTML = `
@@ -1340,7 +1340,7 @@ function renderAudit() {
   const eventCount = (STATE.auditEvents && STATE.auditEvents.length) || 0;
 
   return `
-    ${renderOperationalContextBar('AUDIT CHAIN', 'IMMUTABLE_HASH_LEDGER', 'METHOD 25 · MERKLE AUDIT TRAIL', 'VALIDATED')}
+    ${renderOperationalContextBar('AUDIT CHAIN', 'IMMUTABLE_HASH_LEDGER', 'METHOD 25 · SHA-256 HASH-CHAINED AUDIT LEDGER', 'VALIDATED')}
 
     <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px;">
@@ -1348,7 +1348,7 @@ function renderAudit() {
           <div class="section-label">CRYPTOGRAPHIC INTEGRITY LEDGER</div>
           <h2 class="card-title">SHA-256 Hash-Chained Audit Trail</h2>
           <p style="color: var(--drex-text-muted); font-size: 12px; margin-top: 4px;">
-            Immutable forward-secure cryptographic event sequence. Every operational recovery, sanitization, and evidence action is chained using SHA-256 Merkle preimages.
+            Immutable forward-secure cryptographic event sequence. Every operational recovery, sanitization, and evidence action is chained using SHA-256 previous-event digest linking.
           </p>
         </div>
         <div style="display: flex; gap: 8px; flex-wrap: wrap;">
@@ -1513,7 +1513,7 @@ function renderCertificates() {
           <div class="section-label">FORENSIC COMPLIANCE ATTESTATION</div>
           <h2 class="card-title">Tamper-Evident Forensic Certificates</h2>
           <p style="color: var(--drex-text-muted); font-size: 12px; margin-top: 4px;">
-            NIST SP 800-88 Rev. 2 and ISO/IEC 27037 compliant certificates. Sealed with dual SHA-256 hashes and cryptographic Merkle tree root preimages.
+            NIST SP 800-88 Rev. 2 and ISO/IEC 27037 compliant certificates. Sealed with dual SHA-256 hashes and cryptographic hash-chained audit preimages.
           </p>
         </div>
         <div style="display: flex; gap: 8px; flex-wrap: wrap;">
