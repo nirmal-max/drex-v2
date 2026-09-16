@@ -1432,18 +1432,11 @@ def launch_recovery_scan(
                 detail=f"Invalid case ID: '{req.case_id}'. Case not found.",
             )
         target_case_id = req.case_id.strip()
+        fp_case_id = target_case_id
+        is_adhoc = False
     else:
-        existing_cases = case_manager.list_cases()
-        if existing_cases:
-            target_case_id = existing_cases[0].case_id
-        else:
-            adhoc_case = case_manager.create_case(
-                case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
-                title="Ad-hoc Triage Operation",
-                examiner=current_user.get("display_name", "Forensic Operator"),
-                organization="DREX Triage Operations",
-            )
-            target_case_id = adhoc_case.case_id
+        is_adhoc = True
+        fp_case_id = "DREX_UNASSIGNED_TRIAGE"
 
     # 2. Resolve method/engine identity
     engine_str = str(req.engine).lower().strip()
@@ -1463,7 +1456,7 @@ def launch_recovery_scan(
     adapter_status, adapter_detail = dispatcher.status(resolved_method)
 
     fp = compute_operation_fingerprint(
-        case_id=target_case_id,
+        case_id=fp_case_id,
         operation_type="RECOVERY_SCAN",
         method_id=resolved_method,
         target_path=req.source_path,
@@ -1478,10 +1471,20 @@ def launch_recovery_scan(
             "engine": resolved_method,
             "source": req.source_path,
             "workflow_id": existing.get("workflow_id", req.workflow_id or f"WF-REC-{resolved_method.upper()}"),
-            "case_id": target_case_id,
+            "case_id": existing.get("case_id"),
             "message": "Identical active recovery scan in progress; attached to existing job.",
             "is_duplicate": True,
         }
+
+    if is_adhoc:
+        # Intentionally unassigned ad-hoc operation: allocate fresh isolated triage case
+        adhoc_case = case_manager.create_case(
+            case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
+            title="Ad-hoc Triage Operation",
+            examiner=current_user.get("display_name", "Forensic Operator"),
+            organization="DREX Triage Operations",
+        )
+        target_case_id = adhoc_case.case_id
 
     job_id = f"REC-{uuid.uuid4().hex[:8].upper()}"
     resolved_wf = req.workflow_id or f"WF-REC-{resolved_method.upper()}"
@@ -1982,17 +1985,14 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
             )
         target_case_id = req.case_id.strip()
     else:
-        existing_cases = case_manager.list_cases()
-        if existing_cases:
-            target_case_id = existing_cases[0].case_id
-        else:
-            adhoc_case = case_manager.create_case(
-                case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
-                title="Ad-hoc Triage Operation",
-                examiner=current_user.get("display_name", "Forensic Operator"),
-                organization="DREX Triage Operations",
-            )
-            target_case_id = adhoc_case.case_id
+        # Intentionally unassigned ad-hoc operation: allocate fresh isolated triage case
+        adhoc_case = case_manager.create_case(
+            case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
+            title="Ad-hoc Triage Operation",
+            examiner=current_user.get("display_name", "Forensic Operator"),
+            organization="DREX Triage Operations",
+        )
+        target_case_id = adhoc_case.case_id
 
     # 4. Pre-Execution Revalidation (TOCTOU guard for physical/device and logical targets)
     if "PhysicalDrive" in req.target_path or req.target_path.startswith("\\\\.\\"):

@@ -1,8 +1,9 @@
 # DREX-V2 AUTHORITATIVE BROWSER E2E ACCEPTANCE MATRIX
 **Document Version**: 2.0.0-PROD  
-**Target Commit**: `3fbf60c` (`3fbf60c4de69e94926e1860d338ccad326abc782`)  
+**Target Release Commit**: `0dc8207` (`0dc8207ca305a1bf5d4f2512411980db80cbc4fd`)  
+**Release Lineage**: `f030382` (Baseline) $\to$ `3fbf60c` (Implementation) $\to$ `0dc8207` (Release)  
 **Scope**: Full End-to-End Verification across 12 Mandatory Workflows & 26 Canonical Views  
-**Status**: EMPIRICALLY VERIFIED & ACCEPTED  
+**Status**: EMPIRICALLY EXECUTED & ACCEPTED (63 pytest browser tests, 33 Node.js DOM assertions)  
 
 ---
 

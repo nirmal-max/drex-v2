@@ -205,3 +205,85 @@ def test_p0_01_job_registry_invariant():
             target_path="C:/dummy",
             case_id="   ",
         )
+
+
+def test_p0_01_omitted_case_id_never_attaches_to_active_cases(client, auth_headers, tmp_path):
+    """
+    Gate 2 Authoritative Invariant:
+    When CASE-A and CASE-B exist, an operation with omitted/null case_id
+    MUST NEVER attach to CASE-A or CASE-B.
+    It must either:
+    1. Allocate a fresh isolated DREX-TRIAGE case (destructive/recovery operations), or
+    2. Fail closed by returning [] (GET disclosure endpoints).
+    """
+    # 1. Create CASE-A and CASE-B
+    res_a = client.post("/api/cases", json={
+        "case_number": f"CASE-A-GATE2-{uuid.uuid4().hex[:6].upper()}",
+        "title": "Active Forensic Case Alpha",
+        "examiner": "Examiner Alpha",
+        "organization": "Forensic Directorate",
+    }, headers=auth_headers)
+    assert res_a.status_code == 200
+    case_a_id = res_a.json()["case_id"]
+
+    res_b = client.post("/api/cases", json={
+        "case_number": f"CASE-B-GATE2-{uuid.uuid4().hex[:6].upper()}",
+        "title": "Active Forensic Case Beta",
+        "examiner": "Examiner Beta",
+        "organization": "Forensic Directorate",
+    }, headers=auth_headers)
+    assert res_b.status_code == 200
+    case_b_id = res_b.json()["case_id"]
+
+    # 2. Recovery scan with omitted case_id
+    rec_file = tmp_path / "omitted_case_rec.bin"
+    rec_file.write_bytes(b"\xCC" * 8192)
+    res_rec = client.post("/api/recovery/scan", json={
+        "source_path": str(rec_file),
+        "destination_dir": str(tmp_path / "out"),
+        "engine": "17",
+    }, headers=auth_headers)
+    assert res_rec.status_code == 200
+    rec_job = res_rec.json()
+    # Must NOT attach to CASE-A or CASE-B
+    assert rec_job["case_id"] != case_a_id, "CRITICAL ERROR: Omitted case_id silently attached to CASE-A!"
+    assert rec_job["case_id"] != case_b_id, "CRITICAL ERROR: Omitted case_id silently attached to CASE-B!"
+    # Must allocate fresh isolated DREX-TRIAGE case
+    triage_case = case_manager.get_case(rec_job["case_id"])
+    assert triage_case is not None
+    assert triage_case.case_number.startswith("DREX-TRIAGE-")
+
+    # 3. Destructive sanitization with omitted case_id
+    san_file = tmp_path / "omitted_case_san.bin"
+    san_file.write_bytes(b"\xDD" * 8192)
+    clean_san = str(san_file).replace("\\", "_").replace("/", "_").replace(".", "_").strip("_").upper()
+    res_san = client.post("/api/sanitization/execute", json={
+        "target_path": str(san_file),
+        "method_id": 8,
+        "safety_phrase_entered": f"ERASE-{clean_san}-PERMANENT",
+        "async_execution": True,
+    }, headers=auth_headers)
+    assert res_san.status_code == 200
+    san_job = res_san.json()
+    assert san_job["case_id"] != case_a_id, "CRITICAL ERROR: Omitted case_id silently attached to CASE-A!"
+    assert san_job["case_id"] != case_b_id, "CRITICAL ERROR: Omitted case_id silently attached to CASE-B!"
+    triage_case_san = case_manager.get_case(san_job["case_id"])
+    assert triage_case_san is not None
+    assert triage_case_san.case_number.startswith("DREX-TRIAGE-")
+
+    # 4. Sensitive GET endpoints must FAIL CLOSED (return empty list)
+    # Evidence Vault
+    res_ev = client.get("/api/evidence", headers=auth_headers)
+    assert res_ev.status_code == 200
+    assert res_ev.json() == [], "GET /api/evidence with omitted case_id must fail closed ([])."
+
+    # Certificates
+    res_cert = client.get("/api/certificates", headers=auth_headers)
+    assert res_cert.status_code == 200
+    assert res_cert.json() == [], "GET /api/certificates with omitted case_id must fail closed ([])."
+
+    # Audit Ledger
+    res_audit = client.get("/api/audit/ledger", headers=auth_headers)
+    assert res_audit.status_code == 200
+    assert res_audit.json() == [], "GET /api/audit/ledger with omitted case_id must fail closed ([])."
+
