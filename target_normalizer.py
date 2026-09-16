@@ -75,8 +75,8 @@ class NormalizedTarget:
         }
 
 
-# Regex for Windows Device Namespace: \\.\PhysicalDriveN or \\?\PhysicalDriveN or PhysicalDriveN
-_PHYSICAL_DRIVE_RE = re.compile(r"^(?:\\+[.?]\\+)?PhysicalDrive(\d+)$", re.IGNORECASE)
+# Regex for Windows Device Namespace: \\.\PhysicalDriveN, .PhysicalDriveN, PhysicalDriveN, \\?\PhysicalDriveN
+_PHYSICAL_DRIVE_RE = re.compile(r"^(?:(?:\\+[.?]\\+)|(?:\.?\\+)|(?:\.?))?PhysicalDrive(\d+)$", re.IGNORECASE)
 
 # Regex for Windows Volume: C:, C:\, \\.\C:, \\?\C:
 _VOLUME_RE = re.compile(r"^(?:\\+[.?]\\+)?([A-Za-z]):\\*$", re.IGNORECASE)
@@ -220,6 +220,8 @@ def normalize_target(raw_target: Union[str, pathlib.Path, Any]) -> NormalizedTar
 
     # 4. Ordinary Windows Filesystem Path (File, Directory, Image)
     path_str = raw_str
+    if re.match(r"^[A-Za-z]:[^\\]", path_str):
+        path_str = path_str[:2] + "\\" + path_str[2:]
     if re.match(r"^[A-Za-z]:", path_str):
         path_str = path_str.replace("/", "\\")
         norm_path = os.path.normpath(path_str)

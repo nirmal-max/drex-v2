@@ -176,7 +176,7 @@ def get_git_commit() -> str:
 
 
 def inspect_target_metadata(target_path: str) -> dict:
-    """Inspect arbitrary filesystem target and return rich verified metadata and safety status."""
+    """Inspect arbitrary filesystem or device target and return rich verified metadata and safety status."""
     if not target_path or not str(target_path).strip():
         return {
             "path": "",
@@ -193,20 +193,43 @@ def inspect_target_metadata(target_path: str) -> dict:
             "status": "TARGET_NOT_FOUND",
             "message": "Target path is empty."
         }
-    p = pathlib.Path(target_path).resolve()
-    exists = p.exists()
-    is_file = p.is_file() if exists else False
-    is_dir = p.is_dir() if exists else False
-    target_type = "FILE" if is_file else ("FOLDER" if is_dir else ("DEVICE" if str(target_path).startswith("\\\\.\\") else "UNKNOWN"))
+    
+    norm = normalize_target(target_path)
+    
+    # 1. Win32 Physical Device Namespace (e.g. \\.\PhysicalDrive1, .PhysicalDrive1, PhysicalDrive0)
+    if norm.is_physical_device:
+        return {
+            "path": norm.canonical_target,
+            "type": "DEVICE",
+            "exists": norm.exists,
+            "file_count": 1,
+            "total_size": 0,
+            "readable": norm.exists,
+            "protected": norm.is_system_drive,
+            "filesystem": "RAW_BLOCK_DEVICE",
+            "volume": norm.canonical_target,
+            "mtime": None,
+            "preflight_hash": None,
+            "status": "PROTECTED_BLOCKED" if norm.is_system_drive else ("OK" if norm.exists else "DEVICE_NOT_FOUND"),
+            "message": "OS system physical drive protected by tripwire." if norm.is_system_drive else ("Physical disk device accessible." if norm.exists else "Physical device not found or inaccessible on host system.")
+        }
+    
+    # 2. Filesystem Paths (File, Folder, Volume, Synthetic)
+    clean_path = norm.canonical_target if norm.exists else norm.normalized_target
+    p = pathlib.Path(clean_path)
+    exists = norm.exists
+    is_file = p.is_file() if exists else (norm.target_type == "FILE")
+    is_dir = p.is_dir() if exists else (norm.target_type in ("DIRECTORY", "VOLUME"))
+    target_type = "FILE" if is_file else ("FOLDER" if is_dir else norm.target_type)
     
     file_count = 1 if is_file else 0
     total_size = 0
-    if is_file:
+    if is_file and exists:
         try:
             total_size = p.stat().st_size
         except Exception:
             pass
-    elif is_dir:
+    elif is_dir and exists:
         try:
             count = 0
             size = 0
@@ -235,16 +258,7 @@ def inspect_target_metadata(target_path: str) -> dict:
     elif is_dir and exists:
         readable = os.access(str(p), os.R_OK)
 
-    path_upper = str(p).upper()
-    protected = (
-        path_upper.startswith("C:\\WINDOWS") or
-        path_upper.startswith("C:\\PROGRAM FILES") or
-        path_upper.startswith("C:\\PROGRAMDATA") or
-        path_upper in ("C:\\", "C:") or
-        "PHYSICALDRIVE0" in path_upper or
-        DeviceIntelligenceEngine.is_system_drive(str(p))
-    )
-    
+    protected = norm.is_system_drive
     drive = p.drive if p.drive else ""
     mtime = None
     if exists:
@@ -254,7 +268,7 @@ def inspect_target_metadata(target_path: str) -> dict:
             pass
             
     return {
-        "path": str(p),
+        "path": clean_path,
         "type": target_type,
         "exists": exists,
         "file_count": file_count,
@@ -1083,66 +1097,70 @@ def restore_case(
 
 @app.get("/api/evidence", response_model=List[models.EvidenceItemRecord])
 def list_evidence(case_id: Optional[str] = None, current_user: Dict[str, Any] = Depends(require_permission("evidence:read"))):
-    """List isolated evidence artifacts in the Evidence Vault for the specified case."""
-    if not case_id:
-        return []
-
-    target_case_id = case_id
-    if not case_manager.get_case(target_case_id):
-        return []
+    """List isolated evidence artifacts in the Evidence Vault for the specified case or all cases."""
+    target_case_ids = []
+    if case_id:
+        if case_manager.get_case(case_id):
+            target_case_ids.append(case_id)
+    else:
+        try:
+            target_case_ids = [c.case_id for c in case_manager.list_cases()]
+        except Exception:
+            target_case_ids = []
 
     out = []
     seen_ids = set()
 
-    # 1. Evidence sources (storage drives, raw triage disks)
-    try:
-        items = case_manager.list_evidence(target_case_id)
-        for it in items:
-            ev_id = getattr(it, "evidence_id", "")
-            if ev_id and ev_id not in seen_ids:
-                seen_ids.add(ev_id)
-                out.append(
-                    models.EvidenceItemRecord(
-                        evidence_id=ev_id,
-                        case_id=it.case_id,
-                        name=getattr(it, "model", None) or getattr(it, "device_model", None) or it.source_path,
-                        source_type=it.source_type.value if hasattr(it.source_type, "value") else str(it.source_type),
-                        source_path=it.source_path,
-                        size_bytes=getattr(it, "capacity", 0) or getattr(it, "capacity_bytes", 0) or 0,
-                        sha256_hash=it.source_hash or "",
-                        custodian=getattr(it, "examiner", "Analyst") or getattr(it, "added_by", "Analyst"),
-                        created_utc=getattr(it, "acquisition_timestamp", "") or getattr(it, "added_at", ""),
-                        is_sealed=getattr(it, "read_only", True),
-                    )
-                )
-    except Exception:
-        pass
-
-    # 2. Vault objects (recovered candidate artifacts promoted into vault)
-    try:
-        vault = case_manager.get_vault(target_case_id)
-        if vault:
-            for obj in vault.list_objects():
-                obj_id = getattr(obj, "object_id", "")
-                if obj_id and obj_id not in seen_ids:
-                    seen_ids.add(obj_id)
-                    obj_type_str = obj.object_type.value if hasattr(obj.object_type, "value") else str(obj.object_type)
+    for cid in target_case_ids:
+        # 1. Evidence sources (storage drives, raw triage disks)
+        try:
+            items = case_manager.list_evidence(cid)
+            for it in items:
+                ev_id = getattr(it, "evidence_id", "")
+                if ev_id and ev_id not in seen_ids:
+                    seen_ids.add(ev_id)
                     out.append(
                         models.EvidenceItemRecord(
-                            evidence_id=obj_id,
-                            case_id=obj.case_id,
-                            name=getattr(obj, "original_filename", "") or getattr(obj, "relative_path", "Recovered Artifact"),
-                            source_type=obj_type_str,
-                            source_path=str(obj.relative_path),
-                            size_bytes=getattr(obj, "size_bytes", 0),
-                            sha256_hash=getattr(obj, "sha256", ""),
-                            custodian="Forensic Examiner",
-                            created_utc=getattr(obj, "stored_timestamp", ""),
-                            is_sealed=getattr(obj, "is_sealed", True),
+                            evidence_id=ev_id,
+                            case_id=it.case_id,
+                            name=getattr(it, "model", None) or getattr(it, "device_model", None) or it.source_path,
+                            source_type=it.source_type.value if hasattr(it.source_type, "value") else str(it.source_type),
+                            source_path=it.source_path,
+                            size_bytes=getattr(it, "capacity", 0) or getattr(it, "capacity_bytes", 0) or 0,
+                            sha256_hash=it.source_hash or "",
+                            custodian=getattr(it, "examiner", "Analyst") or getattr(it, "added_by", "Analyst"),
+                            created_utc=getattr(it, "acquisition_timestamp", "") or getattr(it, "added_at", ""),
+                            is_sealed=getattr(it, "read_only", True),
                         )
                     )
-    except Exception:
-        pass
+        except Exception:
+            pass
+
+        # 2. Vault objects (recovered candidate artifacts promoted into vault)
+        try:
+            vault = case_manager.get_vault(cid)
+            if vault:
+                for obj in vault.list_objects():
+                    obj_id = getattr(obj, "object_id", "")
+                    if obj_id and obj_id not in seen_ids:
+                        seen_ids.add(obj_id)
+                        obj_type_str = obj.object_type.value if hasattr(obj.object_type, "value") else str(obj.object_type)
+                        out.append(
+                            models.EvidenceItemRecord(
+                                evidence_id=obj_id,
+                                case_id=obj.case_id,
+                                name=getattr(obj, "original_filename", "") or getattr(obj, "relative_path", "Recovered Artifact"),
+                                source_type=obj_type_str,
+                                source_path=str(obj.relative_path),
+                                size_bytes=getattr(obj, "size_bytes", 0),
+                                sha256_hash=getattr(obj, "sha256", ""),
+                                custodian="Forensic Examiner",
+                                created_utc=getattr(obj, "stored_timestamp", ""),
+                                is_sealed=getattr(obj, "is_sealed", True),
+                            )
+                        )
+        except Exception:
+            pass
 
     return out
 
