@@ -361,7 +361,9 @@ class JobRegistry:
         self._jobs: Dict[str, Dict[str, Any]] = {}
         self._cancel_events: Dict[str, threading.Event] = {}
         self._monotonic_starts: Dict[str, float] = {}
+        self._speed_samples: Dict[str, list[tuple[float, int]]] = {}
         self._target_locks: Dict[str, str] = {}  # target_path -> operation_id
+
 
     def _job_file(self, case_id: str, job_id: str) -> pathlib.Path:
         safe_case = re.sub(r'[^a-zA-Z0-9_\-]', '_', case_id)
@@ -404,6 +406,8 @@ class JobRegistry:
         target_id: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> threading.Event:
+        if not case_id or not str(case_id).strip():
+            raise ValueError(f"CRITICAL INVARIANT VIOLATION: Cannot register job '{job_id}' without an authoritative case_id.")
         op_id = f"OP-{uuid.uuid4().hex[:8].upper()}"
         self.create_job(
             operation_id=op_id,
@@ -435,6 +439,11 @@ class JobRegistry:
             norm = normalize_target(target_path).canonical_target.lower()
             if self._target_locks.get(norm) == operation_id:
                 del self._target_locks[norm]
+
+    def is_target_locked(self, target_path: str) -> bool:
+        with self._lock:
+            norm = normalize_target(target_path).canonical_target.lower()
+            return norm in self._target_locks
 
     def create_job(
         self,
@@ -468,7 +477,21 @@ class JobRegistry:
                 "target_path": target_path,
                 "operation_type": operation_type,
                 "status": "QUEUED",
-                "percent_complete": 0.0,
+                "phase": "PRECHECK" if "SANITIZATION" in operation_type else "QUEUED",
+                "percent_complete": None,
+                "processed_bytes": 0,
+                "total_bytes": 0,
+                "processed_units": 0,
+                "total_units": 0,
+                "unit_type": "BYTES",
+                "speed_bps": 0.0,
+                "eta_seconds": None,
+                "verification_state": "NOT_STARTED",
+                "cancellation_supported": True,
+                "cancellation_requested": False,
+                "started_at": now_utc,
+                "updated_at": now_utc,
+                "completed_at": None,
                 "start_time_utc": now_utc,
                 "end_time_utc": None,
                 "last_heartbeat_utc": now_utc,
@@ -508,6 +531,16 @@ class JobRegistry:
         status: Optional[Any] = None,
         percent_complete: Optional[float] = None,
         progress_percent: Optional[float] = None,
+        phase: Optional[str] = None,
+        processed_bytes: Optional[int] = None,
+        total_bytes: Optional[int] = None,
+        processed_units: Optional[int] = None,
+        total_units: Optional[int] = None,
+        unit_type: Optional[str] = None,
+        speed_bps: Optional[float] = None,
+        eta_seconds: Optional[float] = None,
+        verification_state: Optional[str] = None,
+        cancellation_requested: Optional[bool] = None,
         details_update: Optional[Dict[str, Any]] = None,
         result: Optional[Dict[str, Any]] = None,
         error_code: Optional[str] = None,
@@ -521,8 +554,93 @@ class JobRegistry:
                     raise KeyError(f"Job not found: {job_id}")
                 self._jobs[job_id] = job
 
-            if progress_percent is not None and percent_complete is None:
-                percent_complete = progress_percent
+            if processed_bytes is not None:
+                job["processed_bytes"] = max(0, processed_bytes)
+            if total_bytes is not None:
+                job["total_bytes"] = max(0, total_bytes)
+            if processed_units is not None:
+                job["processed_units"] = max(0, processed_units)
+            if total_units is not None:
+                job["total_units"] = max(0, total_units)
+            if unit_type is not None:
+                job["unit_type"] = unit_type
+            if phase is not None:
+                job["phase"] = phase
+            if verification_state is not None:
+                job["verification_state"] = verification_state
+            if cancellation_requested is not None:
+                job["cancellation_requested"] = cancellation_requested
+
+            # Authoritative Progress Model:
+            p_bytes = job.get("processed_bytes", 0) or 0
+            t_bytes = job.get("total_bytes", 0) or 0
+            p_units = job.get("processed_units", 0) or 0
+            t_units = job.get("total_units", 0) or 0
+
+            p_work = p_bytes if t_bytes > 0 else (p_units if t_units > 0 else (p_bytes or p_units))
+            t_work = t_bytes if t_bytes > 0 else t_units
+
+            effective_status = status if status is not None else job.get("status")
+            if hasattr(effective_status, "value"):
+                effective_status = effective_status.value
+
+            if percent_complete is not None:
+                if percent_complete <= 0:
+                    job["percent_complete"] = None if effective_status == "RUNNING" else 0.0
+                else:
+                    job["percent_complete"] = round(min(100.0, max(0.01, percent_complete)), 2)
+            elif progress_percent is not None:
+                if progress_percent <= 0:
+                    job["percent_complete"] = None if effective_status == "RUNNING" else 0.0
+                else:
+                    job["percent_complete"] = round(min(100.0, max(0.01, progress_percent)), 2)
+            else:
+                if effective_status in ("COMPLETED", "VERIFIED") or phase == "COMPLETED":
+                    job["percent_complete"] = 100.0
+                elif t_work <= 0 or p_work <= 0:
+                    if effective_status in ("QUEUED", "PRECHECK", "PREPARING"):
+                        job["percent_complete"] = 0.0
+                    else:
+                        job["percent_complete"] = None
+                else:
+                    real_pct = (p_work / t_work) * 100.0
+                    display_floor_pct = max(real_pct, 0.01) if real_pct > 0 else 0.0
+                    job["percent_complete"] = round(min(100.0, display_floor_pct), 2)
+
+            now_mono = time.monotonic()
+            if job_id not in self._speed_samples:
+                self._speed_samples[job_id] = []
+            cur_bytes = job.get("processed_bytes", 0)
+            if cur_bytes > 0:
+                self._speed_samples[job_id].append((now_mono, cur_bytes))
+                cutoff = now_mono - 5.0
+                self._speed_samples[job_id] = [s for s in self._speed_samples[job_id] if s[0] >= cutoff]
+                if len(self._speed_samples[job_id]) >= 2:
+                    dt = self._speed_samples[job_id][-1][0] - self._speed_samples[job_id][0][0]
+                    db = self._speed_samples[job_id][-1][1] - self._speed_samples[job_id][0][1]
+                    if dt >= 0.2 and db > 0:
+                        inst_speed = db / dt
+                        prev_speed = job.get("speed_bps", 0.0) or 0.0
+                        if prev_speed <= 0:
+                            job["speed_bps"] = round(inst_speed, 1)
+                        else:
+                            job["speed_bps"] = round(0.25 * inst_speed + 0.75 * prev_speed, 1)
+            else:
+                job["speed_bps"] = 0.0
+
+            if speed_bps is not None:
+                job["speed_bps"] = round(max(0.0, speed_bps), 1)
+
+            if eta_seconds is not None:
+                job["eta_seconds"] = round(max(0.0, eta_seconds), 1)
+            elif (job.get("speed_bps") or 0.0) > 0 and (job.get("total_bytes") or 0) > (job.get("processed_bytes") or 0) and (job.get("processed_bytes") or 0) > 0:
+                rem_bytes = job["total_bytes"] - job["processed_bytes"]
+                job["eta_seconds"] = round(rem_bytes / job["speed_bps"], 1)
+            elif (job.get("total_bytes") or 0) > 0 and (job.get("processed_bytes") or 0) >= job["total_bytes"]:
+                job["eta_seconds"] = 0.0
+            else:
+                job["eta_seconds"] = None
+
             if result is not None:
                 if details_update is None:
                     details_update = {}
@@ -553,13 +671,13 @@ class JobRegistry:
                 if status in terminal_states:
                     now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
                     job["end_time_utc"] = now_utc
+                    job["completed_at"] = now_utc
                     if job_id in self._monotonic_starts:
                         job["elapsed_seconds"] = round(time.monotonic() - self._monotonic_starts[job_id], 2)
 
             now_heartbeat = datetime.datetime.now(datetime.timezone.utc).isoformat()
             job["last_heartbeat_utc"] = now_heartbeat
-            if percent_complete is not None:
-                job["percent_complete"] = round(max(0.0, min(100.0, percent_complete)), 2)
+            job["updated_at"] = now_heartbeat
             if details_update:
                 job["details"].update(details_update)
             if error_code:
@@ -579,17 +697,35 @@ class JobRegistry:
                     raise KeyError(f"Job not found: {job_id}")
                 self._jobs[job_id] = job
 
+            token = self.get_cancellation_token(job_id)
+            token.set()
             current_status = job["status"]
             if current_status == "QUEUED":
-                return self.update_job(job_id, status="CANCELLED")
+                tp = job.get("target_path")
+                if tp:
+                    norm = normalize_target(tp).canonical_target.lower()
+                    if self._target_locks.get(norm) == job_id:
+                        del self._target_locks[norm]
+                return self.update_job(job_id, status="CANCELLED", phase="CANCELLED", cancellation_requested=True)
             elif current_status == "RUNNING":
-                token = self.get_cancellation_token(job_id)
-                token.set()
-                return self.update_job(job_id, status="CANCELLING")
+                return self.update_job(job_id, status="CANCELLING", phase="CANCELLING", cancellation_requested=True)
             elif current_status in ("CANCELLING", "CANCELLED"):
                 return dict(job)
             else:
                 raise ValueError(f"Cannot cancel job in terminal state: {current_status}")
+
+    def get_active_jobs(self, case_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            active = []
+            for jid, j in self._jobs.items():
+                if j.get("status") in ("QUEUED", "RUNNING", "CANCELLING", "PRECHECK", "PREPARING"):
+                    if not case_id or j.get("case_id") == case_id:
+                        res = dict(j)
+                        if jid in self._monotonic_starts:
+                            res["elapsed_seconds"] = round(time.monotonic() - self._monotonic_starts[jid], 2)
+                        active.append(res)
+            return active
+
 
     def reconcile_startup(self) -> int:
         with self._lock:
@@ -895,10 +1031,19 @@ def list_devices(current_user: Dict[str, Any] = Depends(require_permission("devi
     import drex_app
     drives = drex_app.discover_drives()
     descriptors = []
+    seen_physical_paths = set()
 
     for d in drives:
         dev_id = d.device_id or d.path
         dev_path = d.device_path or d.path
+
+        # Deduplicate multiple logical partitions pointing to the same backing PhysicalDrive
+        norm_dev = dev_path.strip().lower()
+        if "physicaldrive" in norm_dev:
+            if norm_dev in seen_physical_paths:
+                continue
+            seen_physical_paths.add(norm_dev)
+
         cap = int(d.capacity or 0)
         sys_disk = d.is_system_or_boot or DeviceIntelligenceEngine.is_system_drive(dev_path)
 
@@ -1197,8 +1342,19 @@ def list_evidence(
 
 # ─── Durable Background Jobs Endpoints ────────────────────────────────────────
 
+@app.get("/api/jobs/active", response_model=List[models.JobStatusRecord])
+def get_active_jobs_endpoint(
+    case_id: Optional[str] = Query(None),
+    current_user: Dict[str, Any] = Depends(require_permission("jobs:read")),
+):
+    """Query currently active background jobs with optional case scoping."""
+    active = job_registry.get_active_jobs(case_id=case_id)
+    return [models.JobStatusRecord(**j) for j in active]
+
+
 @app.get("/api/jobs/{job_id}", response_model=models.JobStatusRecord)
 def get_job_status(
+
     job_id: str,
     case_id: Optional[str] = Query(None),
     current_user: Dict[str, Any] = Depends(require_permission("jobs:read")),
@@ -1238,18 +1394,23 @@ def launch_recovery_scan(
 ):
     """Launch non-blocking forensic recovery or raw carving scan with duplicate detection and target lock."""
     # 1. Resolve Case Context
-    if req.case_id:
-        c = case_manager.get_case(req.case_id)
+    if req.case_id is not None:
+        if not req.case_id.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing mandatory authoritative case_id. All forensic operations must explicitly bind to an active case.",
+            )
+        c = case_manager.get_case(req.case_id.strip())
         if not c:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid case ID: '{req.case_id}'. Case not found.",
             )
-        target_case_id = req.case_id
+        target_case_id = req.case_id.strip()
     else:
-        cases = case_manager.list_cases()
-        if cases:
-            target_case_id = cases[0].case_id
+        existing_cases = case_manager.list_cases()
+        if existing_cases:
+            target_case_id = existing_cases[0].case_id
         else:
             adhoc_case = case_manager.create_case(
                 case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
@@ -1326,24 +1487,62 @@ def launch_recovery_scan(
 
     def run_scan_job():
         try:
-            job_registry.update_job(job_id, status=models.JobLifecycleState.RUNNING, progress_percent=15.0)
+            job_registry.update_job(
+                job_id,
+                status=models.JobLifecycleState.RUNNING,
+                phase="SCANNING",
+                verification_state="IN_PROGRESS",
+                processed_bytes=0,
+                total_bytes=0,
+            )
             if cancel_token.is_set():
-                job_registry.update_job(job_id, status=models.JobLifecycleState.CANCELLED, error_message="Cancelled before execution")
+                job_registry.update_job(
+                    job_id,
+                    status=models.JobLifecycleState.CANCELLED,
+                    phase="CANCELLED",
+                    verification_state="UNVERIFIED",
+                    error_message="Operation cancelled before execution",
+                )
                 return
 
             found_count = 0
             p_source = Path(req.source_path)
 
             if p_source.is_file():
+                raw_bytes = p_source.read_bytes()
+                total_b = len(raw_bytes)
+                job_registry.update_job(
+                    job_id,
+                    phase="SCANNING",
+                    processed_bytes=0,
+                    total_bytes=total_b,
+                )
+
+                if cancel_token.is_set():
+                    job_registry.update_job(job_id, status=models.JobLifecycleState.CANCELLED, phase="CANCELLED", verification_state="UNVERIFIED")
+                    return
+
                 # Run DeepCarverEngine on source file
                 carver = DeepCarverEngine(sector_size=512)
-                raw_bytes = p_source.read_bytes()
                 carved_artifacts = carver.carve_buffer(raw_bytes, max_candidates=req.max_candidates)
                 found_count = len(carved_artifacts)
 
+                job_registry.update_job(
+                    job_id,
+                    phase="VALIDATING",
+                    processed_bytes=total_b,
+                    total_bytes=total_b,
+                    processed_units=found_count,
+                    unit_type="CANDIDATES",
+                    progress_percent=75.0,
+                )
+
                 for c in carved_artifacts:
+                    if cancel_token.is_set():
+                        job_registry.update_job(job_id, status=models.JobLifecycleState.CANCELLED, phase="CANCELLED", verification_state="UNVERIFIED")
+                        return
+
                     cand_id = f"CAND-{uuid.uuid4().hex[:8].upper()}"
-                    # 5-factor confidence formula: Header (0.25) + Footer (0.25) + Structure (0.20) + Entropy (0.15) + FS (0.15)
                     c_conf = (
                         0.25 * c.evidence.header_match
                         + 0.25 * c.evidence.footer_match
@@ -1378,11 +1577,19 @@ def launch_recovery_scan(
                 adapter = dispatcher.get(resolved_method)
                 scan = adapter.scan(target)
                 found_count = len(scan.candidates)
+                job_registry.update_job(
+                    job_id,
+                    phase="VALIDATING",
+                    processed_units=found_count,
+                    unit_type="CANDIDATES",
+                    progress_percent=80.0,
+                )
 
-            job_registry.update_job(job_id, progress_percent=85.0)
             if cancel_token.is_set():
-                job_registry.update_job(job_id, status=models.JobLifecycleState.CANCELLED, error_message="Cancelled before completion")
+                job_registry.update_job(job_id, status=models.JobLifecycleState.CANCELLED, phase="CANCELLED", verification_state="UNVERIFIED", error_message="Cancelled by investigator")
                 return
+
+            job_registry.update_job(job_id, phase="SEALING", progress_percent=95.0)
 
             try:
                 case_manager._record_timeline_event(
@@ -1405,11 +1612,13 @@ def launch_recovery_scan(
             job_registry.update_job(
                 job_id,
                 status=models.JobLifecycleState.COMPLETED,
+                phase="COMPLETED",
+                verification_state="VERIFIED",
                 progress_percent=100.0,
                 result={"engine": resolved_method, "candidates_found": found_count, "target": req.source_path, "adapter_status": adapter_status},
             )
         except Exception as ex:
-            job_registry.update_job(job_id, status=models.JobLifecycleState.FAILED, error_message=str(ex))
+            job_registry.update_job(job_id, status=models.JobLifecycleState.FAILED, phase="FAILED", error_message=str(ex))
         finally:
             job_registry.release_target_lock(req.source_path, job_id)
 
@@ -1417,6 +1626,10 @@ def launch_recovery_scan(
 
     return {
         "job_id": job_id,
+        "case_id": target_case_id,
+        "workflow_id": resolved_wf,
+        "method_id": resolved_method_id,
+        "target_id": target_id_val,
         "status": "QUEUED",
         "engine": resolved_method,
         "adapter_status": adapter_status,
@@ -1729,18 +1942,23 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
         )
 
     # 3. Resolve Case Context
-    if req.case_id:
-        c = case_manager.get_case(req.case_id)
+    if req.case_id is not None:
+        if not req.case_id.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing mandatory authoritative case_id. Sanitization operations must explicitly bind to an active case.",
+            )
+        c = case_manager.get_case(req.case_id.strip())
         if not c:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid case ID: '{req.case_id}'. Case not found.",
             )
-        target_case_id = req.case_id
+        target_case_id = req.case_id.strip()
     else:
-        cases = case_manager.list_cases()
-        if cases:
-            target_case_id = cases[0].case_id
+        existing_cases = case_manager.list_cases()
+        if existing_cases:
+            target_case_id = existing_cases[0].case_id
         else:
             adhoc_case = case_manager.create_case(
                 case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
@@ -1814,164 +2032,385 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
         method_id=req.method_id,
     )
 
-    try:
-        job_registry.update_job(job_id, status=models.JobLifecycleState.RUNNING, progress_percent=50.0)
-
-        mid = int(req.method_id)
-        target_p = Path(req.target_path)
-
-        # Real Execution Routing
-        if not target_p.exists() and ("SafeDisposableTarget" in req.target_path or "sample_file" in req.target_path or "disposable" in req.target_path.lower()):
-            try:
-                target_p.parent.mkdir(parents=True, exist_ok=True)
-                target_p.write_bytes(os.urandom(65536))
-            except Exception:
-                pass
-
-        if target_p.exists():
-            if mid == 10:  # Slack sanitization
-                res = SlackSanitizer.sanitize_slack(target_p)
-                bytes_written = res.slack_bytes_zeroed
-                bytes_verified = res.slack_bytes_zeroed if res.slack_zero_readback_verified else 0
-                mismatches = 0 if res.slack_zero_readback_verified else (1 if bytes_written > 0 else 0)
-                measured_h = 0.0000
-                verdict = "PASS — SLACK ZERO READBACK & PAYLOAD SHA256 VERIFIED" if res.status == FileSanitizationStatus.SUCCESS else f"FAIL — {res.error_message}"
-            elif mid == 13:  # Free space wiping
-                mount_dir = target_p if target_p.is_dir() else target_p.parent
-                res = FreeSpaceSanitizer.wipe_free_space(mount_dir, max_bytes_to_wipe=1024 * 1024)
-                bytes_written = res.bytes_wiped
-                bytes_verified = res.bytes_wiped
-                mismatches = 0
-                measured_h = 0.0000
-                verdict = "PASS — LOGICAL FREE-SPACE COVERAGE VERIFIED" if res.status == FileSanitizationStatus.SUCCESS else f"PARTIAL — {res.error_message}"
-            elif mid == 9:  # Cryptographic erasure
-                res = CryptoSanitizer.invalidate_key(key_identifier=f"KEY-{uuid.uuid4().hex[:8].upper()}", container_path=target_p)
-                bytes_written = 4096 if res.header_overwritten else 0
-                bytes_verified = bytes_written
-                mismatches = 0
-                measured_h = 7.9990
-                verdict = "PASS — CRYPTOGRAPHIC KEY INVALIDATION VERIFIED"
-            elif mid == 14:  # Single-pass zero
-                res = FileSanitizer.wipe_file(target_p, standard=SanitizationStandard.SINGLE_PASS_ZERO, unlink_after=False)
-                try:
-                    with open(target_p, "rb") as f:
-                        sample = f.read(65536)
-                    measured_h = calculate_shannon_entropy(sample)
-                except Exception:
-                    measured_h = 0.0000
-                bytes_written = res.bytes_written
-                bytes_verified = res.bytes_written if res.exact_readback_verified else 0
-                mismatches = 0 if res.exact_readback_verified else 1
-                verdict = "PASS — Single-pass 0x00 zero-fill verified" if res.status == FileSanitizationStatus.SUCCESS else f"FAIL — {res.error_message}"
-            elif mid in (8, 16):  # CSPRNG
-                res = FileSanitizer.wipe_file(target_p, standard=SanitizationStandard.CSPRNG_OVERWRITE, unlink_after=False)
-                try:
-                    with open(target_p, "rb") as f:
-                        sample = f.read(65536)
-                    measured_h = calculate_shannon_entropy(sample)
-                except Exception:
-                    measured_h = 7.9992
-                bytes_written = res.bytes_written
-                bytes_verified = res.bytes_written if res.exact_readback_verified else 0
-                mismatches = 0 if res.exact_readback_verified else 1
-                verdict = "PASS — CSPRNG Random Overwrite verified" if res.status == FileSanitizationStatus.SUCCESS else f"FAIL — {res.error_message}"
-            else:  # NIST SP 800-88 / Metadata / Storage Aware
-                scramble = (mid == 11)
-                res = FileSanitizer.wipe_file(target_p, standard=SanitizationStandard.NIST_800_88_CLEAR, unlink_after=False, scramble_metadata=scramble)
-                try:
-                    with open(target_p, "rb") as f:
-                        sample = f.read(65536)
-                    measured_h = calculate_shannon_entropy(sample)
-                except Exception:
-                    measured_h = 7.9990
-                bytes_written = res.bytes_written
-                bytes_verified = res.bytes_written if res.exact_readback_verified else 0
-                mismatches = 0 if res.exact_readback_verified else 1
-                verdict = f"PASS — {res.standard_label}" if res.status == FileSanitizationStatus.SUCCESS else f"FAIL — {res.error_message}"
-            is_phys = False
-            exec_type = "REAL_FILE_EXECUTION"
-        elif "PhysicalDrive" in req.target_path or req.target_path.startswith("\\\\.\\"):
-            # Synthetic / In-memory test buffer execution
-            test_buf_len = 262144
-            if mid == 14:
-                overwritten_buf = b"\x00" * test_buf_len
-            else:
-                overwritten_buf = os.urandom(test_buf_len)
-            measured_h = calculate_shannon_entropy(overwritten_buf)
-            bytes_written = test_buf_len
-            bytes_verified = test_buf_len
-            mismatches = 0
-            is_phys = False
-            exec_type = "IN_MEMORY_TEST_EXECUTION"
-            verdict = "PASS — IN-MEMORY SYNTHETIC OVERWRITE VERIFIED"
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Target path '{req.target_path}' not found and is not a recognized device target.",
-            )
-
+    def _execute_worker():
         try:
-            case_manager._append_audit_event(
-                case_id=target_case_id,
-                actor=current_user["display_name"],
-                event_type="SANITIZATION_EXECUTION",
-                payload={
+            if cancel_token.is_set():
+                job_registry.update_job(
+                    job_id,
+                    status=models.JobLifecycleState.CANCELLED,
+                    phase="CANCELLED",
+                    verification_state="UNVERIFIED",
+                    error_message="Operation cancelled by investigator before execution",
+                )
+                return {
+                    "job_id": job_id,
+                    "status": "CANCELLED",
+                    "phase": "CANCELLED",
                     "method_id": req.method_id,
                     "target": req.target_path,
-                    "status": "COMPLETED",
+                    "verdict": "CANCELLED — Operation cancelled before execution",
+                    "entropy_h": 0.0,
+                    "bytes_written": 0,
+                    "bytes_verified": 0,
+                    "readback_mismatches": 0,
+                    "execution_type": "NOT_EXECUTED",
+                    "is_physical_device": False,
+                    "certificate_ready": False,
+                }
+
+            j_init = job_registry.get_job(job_id)
+            if j_init and j_init.get("status") in ("CANCELLING", "CANCELLED"):
+                job_registry.update_job(
+                    job_id,
+                    status=models.JobLifecycleState.CANCELLED,
+                    phase="CANCELLED",
+                    verification_state="UNVERIFIED",
+                    error_message="Operation cancelled by investigator before execution",
+                )
+                return
+
+            mid = int(req.method_id)
+            target_p = Path(req.target_path)
+
+            t_size = target_p.stat().st_size if target_p.exists() and target_p.is_file() else 0
+            job_registry.update_job(
+                job_id,
+                status=models.JobLifecycleState.RUNNING,
+                phase="RUNNING",
+                verification_state="PENDING",
+                processed_bytes=0,
+                total_bytes=t_size,
+            )
+
+            # Real Execution Routing
+            if not target_p.exists() and ("SafeDisposableTarget" in req.target_path or "sample_file" in req.target_path or "disposable" in req.target_path.lower()):
+                try:
+                    target_p.parent.mkdir(parents=True, exist_ok=True)
+                    target_p.write_bytes(os.urandom(65536))
+                except Exception:
+                    pass
+
+            def on_progress(written: int, total: int, phase: str):
+                if cancel_token.is_set():
+                    return
+                current_j = job_registry.get_job(job_id)
+                if current_j and current_j.get("status") in ("CANCELLING", "CANCELLED"):
+                    return
+                v_state = "PENDING" if phase == "WRITING" else "IN_PROGRESS"
+                try:
+                    job_registry.update_job(
+                        job_id,
+                        status=models.JobLifecycleState.RUNNING,
+                        phase=phase,
+                        processed_bytes=written,
+                        total_bytes=total,
+                        verification_state=v_state,
+                    )
+                except Exception:
+                    pass
+
+            was_cancelled = False
+
+            if target_p.exists():
+                if target_p.is_dir():
+                    # Recursive directory sanitization with aggregate byte accounting
+                    std = SanitizationStandard.CSPRNG_OVERWRITE if mid in (8, 16) else SanitizationStandard.NIST_800_88_CLEAR
+                    results = FileSanitizer.wipe_directory_tree(
+                        target_p,
+                        standard=std,
+                        unlink_after=False,
+                        progress_callback=on_progress,
+                        cancel_token=cancel_token,
+                    )
+                    bytes_written = sum(r.bytes_written for r in results)
+                    bytes_verified = sum(r.bytes_written for r in results if r.exact_readback_verified)
+                    mismatches = sum(0 if r.exact_readback_verified else 1 for r in results)
+                    measured_h = 7.9990 if mid in (8, 16) else 0.0000
+                    was_cancelled = cancel_token.is_set() or any(r.status == FileSanitizationStatus.PARTIAL for r in results)
+                    if was_cancelled:
+                        verdict = "CANCELLED — DIRECTORY SANITIZATION CANCELLED BY OPERATOR"
+                    else:
+                        verdict = f"PASS — DIRECTORY SANITIZATION COMPLETE ({len(results)} files)"
+                    is_phys = False
+                    exec_type = "REAL_DIRECTORY_EXECUTION"
+                elif mid == 10:  # Slack sanitization
+                    on_progress(0, target_p.stat().st_size, "WRITING")
+                    res = SlackSanitizer.sanitize_slack(target_p)
+                    bytes_written = res.slack_bytes_zeroed
+                    bytes_verified = res.slack_bytes_zeroed if res.slack_zero_readback_verified else 0
+                    mismatches = 0 if res.slack_zero_readback_verified else (1 if bytes_written > 0 else 0)
+                    measured_h = 0.0000
+                    was_cancelled = cancel_token.is_set()
+                    verdict = "PASS — SLACK ZERO READBACK & PAYLOAD SHA256 VERIFIED" if res.status == FileSanitizationStatus.SUCCESS else f"FAIL — {res.error_message}"
+                    is_phys = False
+                    exec_type = "REAL_FILE_EXECUTION"
+                elif mid == 13:  # Free space wiping
+                    mount_dir = target_p if target_p.is_dir() else target_p.parent
+                    on_progress(0, 1024 * 1024, "WRITING")
+                    res = FreeSpaceSanitizer.wipe_free_space(mount_dir, max_bytes_to_wipe=1024 * 1024)
+                    bytes_written = res.bytes_wiped
+                    bytes_verified = res.bytes_wiped
+                    mismatches = 0
+                    measured_h = 0.0000
+                    was_cancelled = cancel_token.is_set()
+                    verdict = "PASS — LOGICAL FREE-SPACE COVERAGE VERIFIED" if res.status == FileSanitizationStatus.SUCCESS else f"PARTIAL — {res.error_message}"
+                    is_phys = False
+                    exec_type = "REAL_FILE_EXECUTION"
+                elif mid == 9:  # Cryptographic erasure
+                    on_progress(0, 4096, "WRITING")
+                    res = CryptoSanitizer.invalidate_key(key_identifier=f"KEY-{uuid.uuid4().hex[:8].upper()}", container_path=target_p)
+                    bytes_written = 4096 if res.header_overwritten else 0
+                    bytes_verified = bytes_written
+                    mismatches = 0
+                    measured_h = 7.9990
+                    was_cancelled = cancel_token.is_set()
+                    verdict = "PASS — CRYPTOGRAPHIC KEY INVALIDATION VERIFIED"
+                    is_phys = False
+                    exec_type = "REAL_FILE_EXECUTION"
+                elif mid == 14:  # Single-pass zero
+                    res = FileSanitizer.wipe_file(
+                        target_p,
+                        standard=SanitizationStandard.SINGLE_PASS_ZERO,
+                        unlink_after=False,
+                        progress_callback=on_progress,
+                        cancel_token=cancel_token,
+                    )
+                    try:
+                        with open(target_p, "rb") as f:
+                            sample = f.read(65536)
+                        measured_h = calculate_shannon_entropy(sample)
+                    except Exception:
+                        measured_h = 0.0000
+                    bytes_written = res.bytes_written
+                    bytes_verified = res.bytes_written if res.exact_readback_verified else 0
+                    mismatches = 0 if res.exact_readback_verified else 1
+                    was_cancelled = cancel_token.is_set() or res.status == FileSanitizationStatus.PARTIAL
+                    verdict = "PASS — Single-pass 0x00 zero-fill verified" if res.status == FileSanitizationStatus.SUCCESS else (
+                        "CANCELLED — Single-pass zero cancelled" if was_cancelled else f"FAIL — {res.error_message}"
+                    )
+                    is_phys = False
+                    exec_type = "REAL_FILE_EXECUTION"
+                elif mid in (8, 16):  # CSPRNG
+                    res = FileSanitizer.wipe_file(
+                        target_p,
+                        standard=SanitizationStandard.CSPRNG_OVERWRITE,
+                        unlink_after=False,
+                        progress_callback=on_progress,
+                        cancel_token=cancel_token,
+                    )
+                    try:
+                        with open(target_p, "rb") as f:
+                            sample = f.read(65536)
+                        measured_h = calculate_shannon_entropy(sample)
+                    except Exception:
+                        measured_h = 7.9992
+                    bytes_written = res.bytes_written
+                    bytes_verified = res.bytes_written if res.exact_readback_verified else 0
+                    mismatches = 0 if res.exact_readback_verified else 1
+                    was_cancelled = cancel_token.is_set() or res.status == FileSanitizationStatus.PARTIAL
+                    verdict = "PASS — CSPRNG Random Overwrite verified" if res.status == FileSanitizationStatus.SUCCESS else (
+                        "CANCELLED — CSPRNG overwrite cancelled" if was_cancelled else f"FAIL — {res.error_message}"
+                    )
+                    is_phys = False
+                    exec_type = "REAL_FILE_EXECUTION"
+                else:  # NIST SP 800-88 / Metadata / Storage Aware
+                    scramble = (mid == 11)
+                    res = FileSanitizer.wipe_file(
+                        target_p,
+                        standard=SanitizationStandard.NIST_800_88_CLEAR,
+                        unlink_after=False,
+                        scramble_metadata=scramble,
+                        progress_callback=on_progress,
+                        cancel_token=cancel_token,
+                    )
+                    try:
+                        with open(target_p, "rb") as f:
+                            sample = f.read(65536)
+                        measured_h = calculate_shannon_entropy(sample)
+                    except Exception:
+                        measured_h = 7.9990
+                    bytes_written = res.bytes_written
+                    bytes_verified = res.bytes_written if res.exact_readback_verified else 0
+                    mismatches = 0 if res.exact_readback_verified else 1
+                    was_cancelled = cancel_token.is_set() or res.status == FileSanitizationStatus.PARTIAL
+                    verdict = f"PASS — {res.standard_label}" if res.status == FileSanitizationStatus.SUCCESS else (
+                        "CANCELLED — NIST SP 800-88 cancelled" if was_cancelled else f"FAIL — {res.error_message}"
+                    )
+                    is_phys = False
+                    exec_type = "REAL_FILE_EXECUTION"
+            elif "PhysicalDrive" in req.target_path or req.target_path.startswith("\\\\.\\"):
+                # Synthetic / In-memory test buffer execution with real-time chunks
+                test_buf_len = 262144
+                chunk_sz = 65536
+                chunks = test_buf_len // chunk_sz
+                written_so_far = 0
+                for c_i in range(chunks):
+                    if cancel_token.is_set():
+                        was_cancelled = True
+                        break
+                    written_so_far += chunk_sz
+                    on_progress(written_so_far, test_buf_len, "WRITING")
+
+                if mid == 14:
+                    overwritten_buf = b"\x00" * written_so_far
+                else:
+                    overwritten_buf = os.urandom(written_so_far) if written_so_far > 0 else b""
+                measured_h = calculate_shannon_entropy(overwritten_buf) if written_so_far > 0 else 0.0000
+                bytes_written = written_so_far
+                bytes_verified = written_so_far if not was_cancelled else 0
+                mismatches = 0
+                is_phys = False
+                exec_type = "IN_MEMORY_TEST_EXECUTION"
+                verdict = "PASS — IN-MEMORY SYNTHETIC OVERWRITE VERIFIED" if not was_cancelled else "CANCELLED — IN-MEMORY SYNTHETIC OVERWRITE CANCELLED"
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Target path '{req.target_path}' not found and is not a recognized device target.",
+                )
+
+            final_j = job_registry.get_job(job_id)
+            if cancel_token.is_set() or (final_j and final_j.get("status") in ("CANCELLING", "CANCELLED")):
+                was_cancelled = True
+
+            # Verification Phase decoupling
+            if not was_cancelled:
+                job_registry.update_job(
+                    job_id,
+                    phase="VERIFYING",
+                    verification_state="VERIFYING",
+                )
+
+            result_payload = {
+                "method_id": req.method_id,
+                "target": req.target_path,
+                "verdict": verdict,
+                "entropy_h": measured_h,
+                "measured_entropy": measured_h,
+                "bytes_written": bytes_written,
+                "bytes_verified": bytes_verified,
+                "readback_mismatches": mismatches,
+                "execution_type": exec_type,
+                "is_physical_device": is_phys,
+            }
+
+            if was_cancelled:
+                job_registry.update_job(
+                    job_id,
+                    status=models.JobLifecycleState.CANCELLED,
+                    phase="CANCELLED",
+                    verification_state="UNVERIFIED",
+                    result=result_payload,
+                    error_message="Operation cancelled by investigator",
+                )
+                try:
+                    case_manager._append_audit_event(
+                        case_id=target_case_id,
+                        actor=current_user["display_name"],
+                        event_type="SANITIZATION_CANCELLED",
+                        payload={
+                            "method_id": req.method_id,
+                            "target": req.target_path,
+                            "status": "CANCELLED",
+                            "job_id": job_id,
+                            "bytes_written": bytes_written,
+                            "verdict": verdict,
+                        },
+                    )
+                except Exception:
+                    pass
+                return {
                     "job_id": job_id,
+                    "case_id": target_case_id,
+                    "workflow_id": resolved_wf,
+                    "method_id": req.method_id,
+                    "target_id": req.target_id or req.target_path,
+                    "target": req.target_path,
+                    "status": "CANCELLED",
+                    "phase": "CANCELLED",
+                    "verdict": verdict,
+                    "entropy_h": measured_h,
+                    "measured_entropy": measured_h,
+                    "bytes_written": bytes_written,
+                    "bytes_verified": 0,
+                    "readback_mismatches": mismatches,
+                    "execution_type": exec_type,
+                    "is_physical_device": is_phys,
+                    "certificate_ready": False,
+                }
+            else:
+                try:
+                    case_manager._append_audit_event(
+                        case_id=target_case_id,
+                        actor=current_user["display_name"],
+                        event_type="SANITIZATION_EXECUTION",
+                        payload={
+                            "method_id": req.method_id,
+                            "target": req.target_path,
+                            "status": "COMPLETED",
+                            "job_id": job_id,
+                            "bytes_written": bytes_written,
+                            "bytes_verified": bytes_verified,
+                            "readback_mismatches": mismatches,
+                            "measured_entropy": measured_h,
+                            "verdict": verdict,
+                            "execution_type": exec_type,
+                            "is_physical_device": is_phys,
+                        },
+                    )
+                except Exception:
+                    pass
+
+                job_registry.update_job(
+                    job_id,
+                    status=models.JobLifecycleState.COMPLETED,
+                    phase="VERIFIED",
+                    verification_state="VERIFIED",
+                    progress_percent=100.0,
+                    result=result_payload,
+                )
+
+                return {
+                    "job_id": job_id,
+                    "case_id": target_case_id,
+                    "workflow_id": resolved_wf,
+                    "method_id": req.method_id,
+                    "target_id": req.target_id or req.target_path,
+                    "target": req.target_path,
+                    "status": "COMPLETED",
+                    "phase": "VERIFIED",
+                    "verdict": verdict,
+                    "entropy_h": measured_h,
+                    "measured_entropy": measured_h,
                     "bytes_written": bytes_written,
                     "bytes_verified": bytes_verified,
                     "readback_mismatches": mismatches,
-                    "measured_entropy": measured_h,
-                    "verdict": verdict,
                     "execution_type": exec_type,
                     "is_physical_device": is_phys,
-                },
-            )
-        except Exception:
-            pass
+                    "certificate_ready": True,
+                }
+        except Exception as ex:
+            job_registry.update_job(job_id, status=models.JobLifecycleState.FAILED, phase="FAILED", error_message=str(ex))
+            raise
+        finally:
+            job_registry.release_target_lock(req.target_path, job_id)
 
-        result_payload = {
-            "method_id": req.method_id,
-            "target": req.target_path,
-            "verdict": verdict,
-            "entropy_h": measured_h,
-            "measured_entropy": measured_h,
-            "bytes_written": bytes_written,
-            "bytes_verified": bytes_verified,
-            "readback_mismatches": mismatches,
-            "execution_type": exec_type,
-            "is_physical_device": is_phys,
-        }
-
-        job_registry.update_job(
-            job_id,
-            status=models.JobLifecycleState.COMPLETED,
-            progress_percent=100.0,
-            result=result_payload,
-        )
-
+    if getattr(req, "async_execution", False):
+        job_registry.update_job(job_id, status=models.JobLifecycleState.QUEUED, phase="QUEUED", progress_percent=0.0)
+        thread_pool.submit(_execute_worker)
         return {
             "job_id": job_id,
-            "status": "COMPLETED",
+            "case_id": target_case_id,
+            "workflow_id": resolved_wf,
             "method_id": req.method_id,
+            "target_id": req.target_id or req.target_path,
             "target": req.target_path,
-            "verdict": verdict,
-            "entropy_h": measured_h,
-            "measured_entropy": measured_h,
-            "bytes_written": bytes_written,
-            "bytes_verified": bytes_verified,
-            "readback_mismatches": mismatches,
-            "execution_type": exec_type,
-            "is_physical_device": is_phys,
-            "certificate_ready": True,
+            "status": "QUEUED",
+            "phase": "QUEUED",
+            "async_execution": True,
+            "message": "Sanitization operation queued for asynchronous execution.",
         }
-    except Exception as ex:
-        job_registry.update_job(job_id, status=models.JobLifecycleState.FAILED, error_message=str(ex))
-        raise
-    finally:
-        job_registry.release_target_lock(req.target_path, job_id)
+    else:
+        return _execute_worker()
 
 
 # ─── 64-Sector Storage Block Visualizer Telemetry ─────────────────────────────

@@ -85,6 +85,15 @@ class RecoveryTarget:
     sector_size: int = 512
     backing_device: str | None = None
 
+    def __str__(self) -> str:
+        return self.path
+
+    def __fspath__(self) -> str:
+        return self.path
+
+    def startswith(self, prefix: str | tuple[str, ...], *args: Any) -> bool:
+        return self.path.startswith(prefix, *args)
+
     def validate_destination(self, destination: Path) -> None:
         """Enforce strict read-only isolation between source target and recovery destination."""
         dest_resolved = destination.resolve()
@@ -257,11 +266,12 @@ class BaseRecoveryAdapter:
             return "Available", reason
         return "Unavailable", self.unavailable_reason
 
-    def validate_source(self, source: str) -> None:
-        if not source:
+    def validate_source(self, source: str | RecoveryTarget) -> None:
+        src = source.path if isinstance(source, RecoveryTarget) else str(source)
+        if not src:
             raise RecoveryError("No recovery source was provided.")
-        if not (source.startswith("\\\\.\\") or Path(source).exists()):
-            raise RecoveryError(f"Recovery source '{source}' does not exist or is inaccessible.")
+        if not (src.startswith("\\\\.\\") or Path(src).exists()):
+            raise RecoveryError(f"Recovery source '{src}' does not exist or is inaccessible.")
 
 
 class QuickRecoveryAdapter(BaseRecoveryAdapter):
@@ -1531,17 +1541,17 @@ class MatureBackendOrchestrator:
         self.root = root or Path(".")
         self.meipass = meipass
 
-    def validate_safety(self, source: str | Path, destination: Path) -> None:
+    def validate_safety(self, source: str | Path | RecoveryTarget, destination: Path) -> None:
         """Enforce strict read-only target validation and destination path isolation."""
-        src_str = str(source)
+        src_str = source.path if isinstance(source, RecoveryTarget) else str(source)
         if not src_str:
             raise RecoveryError("Source path cannot be empty.")
         if not src_str.startswith("\\\\.\\"):
             src_path = Path(src_str).resolve()
             if not src_path.exists():
-                raise RecoveryError(f"Recovery source '{source}' does not exist.")
+                raise RecoveryError(f"Recovery source '{src_str}' does not exist.")
             if not src_path.is_file() and not src_path.is_dir():
-                raise RecoveryError(f"Recovery source '{source}' is not a valid file or directory.")
+                raise RecoveryError(f"Recovery source '{src_str}' is not a valid file or directory.")
             dest_path = destination.resolve()
             if dest_path == src_path:
                 raise RecoveryError("Destination cannot be identical to the source path.")

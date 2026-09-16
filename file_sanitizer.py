@@ -182,6 +182,8 @@ class FileSanitizer:
         unlink_after: bool = True,
         scramble_metadata: bool = True,
         nist_profile: Optional[NISTProfile] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        cancel_token: Optional[threading.Event] = None,
     ) -> FileWipeResult:
         """Sanitize a single target file using the specified standard overwrite sequence."""
         target = pathlib.Path(file_path)
@@ -230,6 +232,10 @@ class FileSanitizer:
         # Build passes sequence
         passes = cls._get_pass_sequence(standard)
         exact_verified = True
+        total_work_bytes = file_size * len(passes)
+
+        if progress_callback:
+            progress_callback(0, total_work_bytes, "PREPARING")
 
         try:
             # 2. Execute Overwrite Passes
@@ -239,6 +245,24 @@ class FileSanitizer:
                     bytes_remaining = file_size
 
                     while bytes_remaining > 0:
+                        if cancel_token and cancel_token.is_set():
+                            flush_file_buffers(f)
+                            return FileWipeResult(
+                                target_path=str(target),
+                                standard=standard,
+                                pass_count=pass_idx,
+                                bytes_written=total_bytes_written,
+                                pre_wipe_sha256=pre_sha256,
+                                post_wipe_sample_sha256="",
+                                exact_readback_verified=False,
+                                status=FileSanitizationStatus.PARTIAL,
+                                start_time=start_time,
+                                end_time=time.time(),
+                                error_message="Operation cancelled by investigator",
+                                nist_profile=resolved_profile,
+                                standard_label=standard_label,
+                            )
+
                         chunk_len = min(cls.CHUNK_SIZE, bytes_remaining)
                         if pattern_spec is None:
                             # Random pattern
@@ -254,9 +278,15 @@ class FileSanitizer:
                         total_bytes_written += len(buf)
                         bytes_remaining -= len(buf)
 
+                        if progress_callback:
+                            progress_callback(total_bytes_written, total_work_bytes, "WRITING")
+
                     flush_file_buffers(f)
 
                 # 3. Readback Verification (Sample or 100%)
+                if progress_callback:
+                    progress_callback(total_bytes_written, total_work_bytes, "VERIFYING")
+
                 f.seek(0)
                 read_sample = f.read(min(file_size, cls.CHUNK_SIZE))
                 post_sample_sha256 = hashlib.sha256(read_sample).hexdigest()
@@ -283,6 +313,9 @@ class FileSanitizer:
                 except OSError:
                     pass
 
+            if progress_callback:
+                progress_callback(total_bytes_written, total_work_bytes, "SEALING")
+
             return FileWipeResult(
                 target_path=str(target),
                 standard=standard,
@@ -297,7 +330,6 @@ class FileSanitizer:
                 nist_profile=resolved_profile,
                 standard_label=standard_label,
             )
-
 
         except (PermissionError, OSError) as e:
             return FileWipeResult(
@@ -323,6 +355,8 @@ class FileSanitizer:
         standard: SanitizationStandard = SanitizationStandard.NIST_800_88_CLEAR,
         unlink_after: bool = True,
         nist_profile: Optional[NISTProfile] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        cancel_token: Optional[threading.Event] = None,
     ) -> List[FileWipeResult]:
         """Recursively sanitize all files in a directory tree, followed by folder removal."""
         results: List[FileWipeResult] = []
@@ -331,15 +365,38 @@ class FileSanitizer:
         if not root_dir.is_dir():
             return results
 
-        # 1. Wipe all descendant files
+        # Enumerate all files first to compute accurate aggregate work
+        all_files: List[pathlib.Path] = []
         for root, _, files in os.walk(root_dir, topdown=False):
             for file_name in files:
-                full_path = pathlib.Path(root) / file_name
-                res = cls.wipe_file(full_path, standard=standard, unlink_after=unlink_after, nist_profile=nist_profile)
-                results.append(res)
+                all_files.append(pathlib.Path(root) / file_name)
+
+        num_passes = len(cls._get_pass_sequence(standard))
+        total_aggregate_bytes = sum(f.stat().st_size for f in all_files if f.is_file()) * num_passes
+        cumulative_bytes = 0
+
+        # 1. Wipe all descendant files
+        for file_idx, full_path in enumerate(all_files, start=1):
+            if cancel_token and cancel_token.is_set():
+                break
+            file_base = cumulative_bytes
+            def file_progress_cb(w: int, t: int, phase: str):
+                if progress_callback:
+                    progress_callback(file_base + w, total_aggregate_bytes, phase)
+
+            res = cls.wipe_file(
+                full_path,
+                standard=standard,
+                unlink_after=unlink_after,
+                nist_profile=nist_profile,
+                progress_callback=file_progress_cb,
+                cancel_token=cancel_token,
+            )
+            results.append(res)
+            cumulative_bytes += res.bytes_written
 
         # 2. Remove directories from leaves up
-        if unlink_after:
+        if unlink_after and not (cancel_token and cancel_token.is_set()):
             for root, dirs, _ in os.walk(root_dir, topdown=False):
                 for dir_name in dirs:
                     d_path = pathlib.Path(root) / dir_name

@@ -263,6 +263,8 @@ class SanitizationExecuteRequest(BaseModel):
     target_id: Optional[str] = None
     simulate_only: bool = False
     preflight_identity: Optional[str] = None
+    async_execution: bool = False
+
 
 
 # ─── Verification & Audit Models ──────────────────────────────────────────────
@@ -335,13 +337,28 @@ class JobStatusRecord(BaseModel):
     target_path: str
     operation_type: str
     status: JobLifecycleState
-    percent_complete: float = 0.0
+    phase: Optional[str] = None
+    percent_complete: Optional[float] = None
+    processed_bytes: Optional[int] = 0
+    total_bytes: Optional[int] = 0
+    processed_units: Optional[int] = 0
+    total_units: Optional[int] = 0
+    unit_type: Optional[str] = "BYTES"
+    speed_bps: Optional[float] = 0.0
+    eta_seconds: Optional[float] = None
+    verification_state: Optional[str] = "NOT_STARTED"
+    cancellation_supported: bool = True
+    cancellation_requested: bool = False
+    started_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    completed_at: Optional[str] = None
     start_time_utc: str
     end_time_utc: Optional[str] = None
     elapsed_seconds: float = 0.0
     details: Dict[str, Any] = Field(default_factory=dict)
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+
 
 
 class PaginationQuery(BaseModel):
@@ -623,6 +640,7 @@ class TestResultsResponseModel(BaseModel):
     pytest_version: str
     python_version: str
     environment: str
+    provenance: Optional[str] = "AUTHENTIC_PYTEST_EXECUTION"
     collected: int
     passed: int
     failed: int

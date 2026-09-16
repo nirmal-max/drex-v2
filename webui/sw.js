@@ -1,7 +1,7 @@
 /**
  * DREX-V2 Forensic Progressive Web App (PWA) Service Worker
  * ==========================================================
- * Version: drex-v2-shell-fbad09d
+ * Version: drex-v2-shell-2.0.0-final
  * 
  * Strict Safety & Forensic Integrity Policy:
  * 1. Network-First Strategy: All UI assets (index.html, app.js, styles.css) are fetched
@@ -13,7 +13,7 @@
  *    Offline requests to mutation/live endpoints are intercepted and rejected with 503.
  */
 
-const CACHE_VERSION = 'fbad09d';
+const CACHE_VERSION = '2.0.0-final';
 const CACHE_NAME = `drex-v2-shell-${CACHE_VERSION}`;
 const STATIC_ASSETS = [
   '/',

@@ -29,8 +29,8 @@
 ### Quick Start
 ```powershell
 # Clone the repository
-git clone https://github.com/nirmal-max/DREXX.git
-cd DREXX
+git clone https://github.com/nirmal-max/drex-v2.git
+cd drex-v2
 
 # Install Python requirements
 pip install -r requirements.txt  # or: pip install cryptography reportlab qrcode pillow pytest
@@ -77,7 +77,7 @@ python drex_app.py --doctor
 # Run internal self-test suite
 python drex_app.py --self-test
 
-# Run full automated test suite (106 tests)
+# Run full automated test suite (995 verified tests)
 pytest -q
 ```
 
@@ -94,9 +94,9 @@ build\dist\DREX.exe
 
 ## Documentation
 
-* [Authoritative 25-Method Validation Matrix](file:///D:/DREXX/FINAL_VALIDATION_MATRIX.md)
-* [User Manual & Operations Guide](file:///D:/DREXX/USER_MANUAL.md)
-* [Technical Architecture Documentation](file:///D:/DREXX/TECHNICAL_DOCUMENTATION.md)
-* [Comprehensive Validation Report](file:///D:/DREXX/VALIDATION_REPORT.md)
-* [Performance Evaluation Report](file:///D:/DREXX/PERFORMANCE_EVALUATION.md)
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party component licenses.
+* [Authoritative 25-Method Validation Matrix](FINAL_VALIDATION_MATRIX.md)
+* [User Manual & Operations Guide](USER_MANUAL.md)
+* [Technical Architecture Documentation](TECHNICAL_DOCUMENTATION.md)
+* [Comprehensive Validation Report](VALIDATION_REPORT.md)
+* [Performance Evaluation Report](PERFORMANCE_EVALUATION.md)
+* [Third-Party Notices](THIRD_PARTY_NOTICES.md)
