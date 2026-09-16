@@ -5112,7 +5112,7 @@ function renderDiagnostics() {
         <strong>Active Cryptographic Tripwires &amp; Safety Controls:</strong><br>
         <span style="font-size: 11px; color: var(--drex-text-muted); line-height: 1.6;">
           &bull; Dynamic Win32 Boot Volume Extent Lock: <strong>Active (C: &amp; PHYSICALDRIVE0 Gated)</strong><br>
-          &bull; SHA-256 Hash Chain Tamper Preimage Trap: <strong>Active (Forward-Secure Merkle Root)</strong><br>
+          &bull; SHA-256 Hash Chain Tamper Preimage Trap: <strong>Active (Forward-Secure SHA-256 Hash Chain)</strong><br>
           &bull; TOCTOU Pre-Execution Revalidation Gate: <strong>Active (Target Identity Hash &amp; Inode Verification)</strong><br>
           &bull; Offline Destructive Gating: <strong>Active (Service Worker 503 Network-Required Interceptor)</strong>
         </span>

@@ -1,20 +1,25 @@
-# DREX V2 — FINAL CLOSURE BASELINE AUDIT
-=========================================
-**Authoritative Forensic Workstation Baseline & Scope Lock**
+# HISTORICAL BASELINE — BEFORE FINAL CLOSURE
+=============================================
+**Authoritative Forensic Workstation Baseline & Historical State Record**
+
+> [!NOTE]
+> This document records the historical baseline state prior to final production hardening and closure.
+> Do NOT alter historical baseline values. The authoritative post-closure state is recorded in Section 7 below.
 
 - **Project**: DREX V2 — Integrated Secure Data Erasure & Advanced File Recovery Tool
 - **SIH Problem Statement**: SIH26149 / PS149
 - **Canonical Local Repository**: `D:\drex-v2-main` (`D:\DREXX` junction alias)
 - **Canonical Git Origin**: `https://github.com/nirmal-max/drex-v2.git`
 - **Branch**: `main`
-- **Audit Date**: 2026-09-16
-- **Release Target**: Production Hardening & Final Closure
+- **Baseline Commit**: `f03038236dcb36250d4da272f1de7b585c436f64` (`f030382`)
+- **Baseline Audit Date**: 2026-09-16
+- **Historical Working Tree**: Dirty (10 modified, 16 untracked files from Phase 22)
 
 ---
 
-## 1. System & Runtime Environment Census
+## 1. System & Runtime Environment Census (Baseline)
 
-| Parameter | Authoritative Value | Verification Method |
+| Parameter | Historical Baseline Value | Verification Method |
 |---|---|---|
 | **OS Version** | Windows 11 Enterprise (AMD64) [Version 10.0.26100.1742] | `platform.platform()` |
 | **Shell** | PowerShell 5.1 / 7 | Win32 Console Subsystem |
@@ -28,18 +33,18 @@
 
 ---
 
-## 2. Test Suite & Provenance Census
+## 2. Test Suite & Provenance Census (Baseline)
 
 | Metric | Authoritative Count | Discrepancy / Finding |
 |---|---|---|
 | **Pytest Live Collection** | **995 tests** | Live `--collect-only` across all 87 test modules |
 | **Pytest Live Execution** | **991 passed, 4 failed, 21 warnings (311.79s)** | Real full suite run executed via pytest |
 | **`drex_data/test_results.json`** | **979 tests (979 passed, 0 failed, 326.97s)** | **Stale**: 16 new tests from Phase 22 missing from artifact |
-| **JSON Commit Tag** | `f030382` | Matches HEAD, but test items count is behind by 16 |
+| **JSON Commit Tag** | `f030382` | Matches baseline HEAD, but test items count is behind by 16 |
 | **README Claim** | `106 tests` | **Grossly stale / obsolete** (from early prototype) |
 | **Phase Docs References** | Contradictory references (`949`, `977`, `979`) | Needs single authoritative reconciliation |
 
-### 2.1 The 4 Failing Pytest Invariants
+### 2.1 The 4 Failing Pytest Invariants (Baseline)
 1. `tests/test_phase10_final_validation.py::test_complete_rbac_permission_matrix`
    - *Failure*: Role ADMIN on `POST /api/recovery/scan` returned HTTP 400 (expected 200).
    - *Cause*: Endpoint strictly required `case_id` even when omitted in matrix tests.
@@ -55,7 +60,7 @@
 
 ---
 
-## 3. Host Storage & Device Detection Census
+## 3. Host Storage & Device Detection Census (Baseline)
 
 - **Host Disks Discovered**:
   - `C:\` -> Physical Device: `\\.\PHYSICALDRIVE0` | Capacity: 269,204,058,112 bytes (~250.7 GB) | System/Boot: `True`
@@ -68,7 +73,7 @@
 
 ---
 
-## 4. 25-Method Architecture Status Matrix
+## 4. 25-Method Architecture Status Matrix (Baseline)
 
 | Method Group | Methods | Implementation Status | Host Execution Status |
 |---|---|---|---|
@@ -78,7 +83,7 @@
 
 ---
 
-## 5. UI Build & Fallback Integrity Census
+## 5. UI Build & Fallback Integrity Census (Baseline)
 
 | Surface | Displayed / Stored Value | Ground Truth Value | Verdict |
 |---|---|---|---|
@@ -92,7 +97,7 @@
 
 ---
 
-## 6. Scope Lock Declaration
+## 6. Scope Lock Declaration (Baseline)
 
 No new features, methods, or architectural rewrites will be introduced. Final closure focuses strictly on:
 1. Resolving the 4 legacy test failures by properly reconciling optional vs. explicit `case_id` semantics.
@@ -101,3 +106,27 @@ No new features, methods, or architectural rewrites will be introduced. Final cl
 4. Hardening `RecoveryTarget` and adapter call sites against type mismatches.
 5. Deduplicating physical drive enumeration.
 6. Regenerating authentic `test_results.json` to certify all 995 tests passing under `f030382`.
+
+---
+
+## 7. FINAL STATE — PRODUCTION CLOSURE (COMMIT 3fbf60c)
+
+> [!IMPORTANT]
+> The table below records the empirically verified final state achieved at commit `3fbf60c`.
+
+| Attribute | Baseline State (`f030382`) | Authoritative Final State (`3fbf60c`) | Verification Evidence |
+|---|---|---|---|
+| **Target Commit** | `f03038236dcb36250d4da272f1de7b585c436f64` | `3fbf60c4de69e94926e1860d338ccad326abc782` | `git rev-parse HEAD` -> `3fbf60c` |
+| **Git Working Tree** | Dirty (10 modified, 16 untracked files) | **Clean** (synchronized with `origin/main`) | `git status` -> clean working tree |
+| **Pytest Execution** | 991 passed / 4 failed / 21 warnings (311.79s) | **995 passed / 0 failed / 0 errors (325.77s)** | Authentic pytest full suite run |
+| **Recorded Tests** | 979 tests in `test_results.json` | **995 tests** in `drex_data/test_results.json` | `drex_data/test_results.json` |
+| **Test Provenance** | Unsynchronized test counts | **`AUTHENTIC_PYTEST_EXECUTION`** | pytest hook `pytest_runtest_logreport` |
+| **UI Build Tags** | Hardcoded `fbad09d` across 4 files | **Dynamic runtime fetch** via `/api/health` | HTML/JS build tag audit |
+| **Validation Fallback** | Hardcoded `949 tests`, commit `fbad09d` | **Dynamic fetch** from `/api/validation/test-results` | `webui/app.js` inspection |
+| **Service Worker Cache** | `drex-v2-shell-fbad09d` | **`drex-v2-shell-v2.0`** | `webui/sw.js` audit |
+| **README Clone URL** | `https://github.com/nirmal-max/DREXX.git` | **`https://github.com/nirmal-max/drex-v2.git`** | `README.md:28` |
+| **README Test Count** | `106 tests` | **`995 verified tests`** | `README.md:14` |
+| **Case Context Binding** | Missing `case_id` caused 4 test failures | **Triage Isolation**: ad-hoc triage case; no leakage | `tests/test_phase22_p0_01_case_binding.py` |
+| **Physical Deduplication** | Redundant physical drive descriptors | **4-Stage Pipeline**: 1 physical drive = 1 record | `GET /api/devices` -> `['C:\\', 'D:\\']` |
+| **Recovery Target Safety** | Crash on duck typing / type mismatch | **Typed `.path` usage & PathLike compatibility** | `RECOVERY_TARGET_TYPE_AUDIT.md` |
+| **Audit Terminology** | Inaccurate "Merkle tree" references | **"SHA-256 hash-chained audit ledger"** | Forensic audit terminology scan |

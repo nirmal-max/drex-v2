@@ -2184,6 +2184,7 @@ class ForensicCaseManager:
                 details.append("PDF artifact missing from vault certificate directory.")
 
             # 4. Audit Chain Verification
+            cert_event = None
             audit_chain_res = self.verify_case_audit_chain(case_id)
             audit_chain_valid = (audit_chain_res.status == AuditVerificationStatus.VALID)
             if audit_chain_valid:
@@ -2204,7 +2205,14 @@ class ForensicCaseManager:
             # 5. Operation Binding
             operation_binding_valid = True
             op_id = cert_data.get("operation_id")
-            if op_id:
+            if cert_event:
+                expected_op = cert_event.canonical_payload.get("operation_id")
+                if expected_op and op_id != expected_op:
+                    operation_binding_valid = False
+                    details.append(f"Operation binding MISMATCH: certificate specifies '{op_id}' but audit event bound to '{expected_op}'.")
+                elif op_id:
+                    details.append(f"Operation binding verified: bound to operation {op_id}.")
+            elif op_id:
                 details.append(f"Operation binding verified: bound to operation {op_id}.")
 
             overall_valid = bool(

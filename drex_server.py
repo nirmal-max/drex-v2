@@ -674,6 +674,11 @@ class JobRegistry:
                     job["completed_at"] = now_utc
                     if job_id in self._monotonic_starts:
                         job["elapsed_seconds"] = round(time.monotonic() - self._monotonic_starts[job_id], 2)
+                    tp = job.get("target_path")
+                    if tp:
+                        norm = normalize_target(tp).canonical_target.lower()
+                        if self._target_locks.get(norm) == job_id:
+                            del self._target_locks[norm]
 
             now_heartbeat = datetime.datetime.now(datetime.timezone.utc).isoformat()
             job["last_heartbeat_utc"] = now_heartbeat
@@ -1027,25 +1032,46 @@ def inspect_target_endpoint(req: models.TargetInspectRequest):
 
 @app.get("/api/devices", response_model=List[models.DeviceDescriptor])
 def list_devices(current_user: Dict[str, Any] = Depends(require_permission("devices:read"))):
-    """Enumerate physical drives, partitions, bus interfaces, and safety lock states."""
+    """Enumerate physical drives, partitions, bus interfaces, and safety lock states.
+
+    DEVICE IDENTITY PIPELINE:
+    Stage 1: Raw Enumeration (drex_app.discover_drives)
+    Stage 2: Normalization (canonical physical device key extraction)
+    Stage 3: Deduplication & Aggregation (mount point aggregation & safety flag union)
+    Stage 4: Final Device List (1 physical drive = exactly 1 canonical descriptor)
+    """
     import drex_app
     drives = drex_app.discover_drives()
-    descriptors = []
-    seen_physical_paths = set()
+    canonical_devices: Dict[str, models.DeviceDescriptor] = {}
 
     for d in drives:
         dev_id = d.device_id or d.path
         dev_path = d.device_path or d.path
 
-        # Deduplicate multiple logical partitions pointing to the same backing PhysicalDrive
+        # Stage 2: Normalization — Extract canonical physical device identifier
         norm_dev = dev_path.strip().lower()
-        if "physicaldrive" in norm_dev:
-            if norm_dev in seen_physical_paths:
-                continue
-            seen_physical_paths.add(norm_dev)
+        m = re.search(r"physicaldrive(\d+)", norm_dev)
+        if m:
+            canon_key = f"\\\\.\\PhysicalDrive{m.group(1)}"
+        elif d.serial and d.serial not in ("UNKNOWN_SERIAL", "SYNTHETIC"):
+            canon_key = f"SERIAL:{d.serial.strip()}"
+        else:
+            canon_key = norm_dev
 
+        sys_disk = bool(d.is_system_or_boot or DeviceIntelligenceEngine.is_system_drive(dev_path))
         cap = int(d.capacity or 0)
-        sys_disk = d.is_system_or_boot or DeviceIntelligenceEngine.is_system_drive(dev_path)
+
+        # Stage 3: Deduplication & Aggregation
+        if canon_key in canonical_devices:
+            rec = canonical_devices[canon_key]
+            if d.path and d.path not in rec.mount_points:
+                rec.mount_points.append(d.path)
+            if sys_disk and not rec.is_system_disk:
+                rec.is_system_disk = True
+                rec.is_boot_disk = True
+                rec.hardware_qualification_status = "PROTECTED_SYSTEM_DISK"
+                rec.safety_block_reason = "Operating System / Active Boot Disk Locked"
+            continue
 
         if cap > 1024**3:
             cap_human = f"{cap / (1024**3):.1f} GB"
@@ -1054,28 +1080,27 @@ def list_devices(current_user: Dict[str, Any] = Depends(require_permission("devi
         else:
             cap_human = f"{cap} B"
 
-        descriptors.append(
-            models.DeviceDescriptor(
-                device_id=dev_id,
-                device_path=dev_path,
-                model=d.model or "Storage Target",
-                serial_number=d.serial or "UNKNOWN_SERIAL",
-                bus_type=str(d.transport_bus or d.interface or "USB"),
-                media_type=str(d.media_type or "HDD"),
-                capacity_bytes=cap,
-                capacity_human=cap_human,
-                sector_size=int(d.sector_size or 512),
-                is_system_disk=sys_disk,
-                is_boot_disk=sys_disk,
-                is_removable=bool(d.is_usb_bridge or d.drive_type == "Removable"),
-                is_write_protected=False,
-                mount_points=[d.path] if d.path else [],
-                hardware_qualification_status="PROTECTED_SYSTEM_DISK" if sys_disk else "QUALIFIED",
-                safety_block_reason="Operating System / Active Boot Disk Locked" if sys_disk else None,
-            )
+        canonical_devices[canon_key] = models.DeviceDescriptor(
+            device_id=dev_id,
+            device_path=dev_path,
+            model=d.model or "Storage Target",
+            serial_number=d.serial or "UNKNOWN_SERIAL",
+            bus_type=str(d.transport_bus or d.interface or "USB"),
+            media_type=str(d.media_type or "HDD"),
+            capacity_bytes=cap,
+            capacity_human=cap_human,
+            sector_size=int(d.sector_size or 512),
+            is_system_disk=sys_disk,
+            is_boot_disk=sys_disk,
+            is_removable=bool(d.is_usb_bridge or d.drive_type == "Removable"),
+            is_write_protected=False,
+            mount_points=[d.path] if d.path else [],
+            hardware_qualification_status="PROTECTED_SYSTEM_DISK" if sys_disk else "QUALIFIED",
+            safety_block_reason="Operating System / Active Boot Disk Locked" if sys_disk else None,
         )
 
-    return descriptors
+    # Stage 4: Final Device List
+    return list(canonical_devices.values())
 
 
 @app.get("/api/devices/{device_id}/qualification", response_model=List[models.MethodQualificationItem])
@@ -1416,6 +1441,7 @@ def launch_recovery_scan(
                 case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
                 title="Ad-hoc Triage Operation",
                 examiner=current_user.get("display_name", "Forensic Operator"),
+                organization="DREX Triage Operations",
             )
             target_case_id = adhoc_case.case_id
 
@@ -1575,7 +1601,7 @@ def launch_recovery_scan(
                     kind=TargetKind.DISK_IMAGE if not req.source_path.startswith("\\\\.\\") else TargetKind.PHYSICAL_DEVICE,
                 )
                 adapter = dispatcher.get(resolved_method)
-                scan = adapter.scan(target)
+                scan = adapter.scan(target.path)
                 found_count = len(scan.candidates)
                 job_registry.update_job(
                     job_id,
@@ -1964,6 +1990,7 @@ def execute_sanitization(req: models.SanitizationExecuteRequest, current_user: D
                 case_number=f"DREX-TRIAGE-{uuid.uuid4().hex[:6].upper()}",
                 title="Ad-hoc Triage Operation",
                 examiner=current_user.get("display_name", "Forensic Operator"),
+                organization="DREX Triage Operations",
             )
             target_case_id = adhoc_case.case_id
 

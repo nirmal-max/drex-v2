@@ -40,7 +40,7 @@ This audit certifies the visual fidelity, responsive behavior, accessibility com
   - `PRECHECK` / `QUEUED`: Cool Slate (`#64748b`) with subtle border.
   - `WRITING`: Vibrant Sapphire Blue (`#007aff`) with pulsing write activity indicator.
   - `VERIFYING`: Amber/Orange (`#f59e0b`) showing Shannon entropy calculation.
-  - `SEALING`: Purple (`#8e44ad`) indicating Merkle audit tree binding.
+  - `SEALING`: Purple (`#8e44ad`) indicating SHA-256 hash-chained audit ledger binding.
   - `COMPLETED`: Vivid Emerald (`#34c759`) with checkmark badge.
   - `CANCELLED`: Crimson/Vermilion (`#ff3b30`) with abort icon.
 - **Progress Gauge**: Precision progress bar with dual-stage visualization (write track vs verification badge).
