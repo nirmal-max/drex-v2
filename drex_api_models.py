@@ -262,6 +262,7 @@ class SanitizationExecuteRequest(BaseModel):
     workflow_id: Optional[str] = None
     target_id: Optional[str] = None
     simulate_only: bool = False
+    preflight_identity: Optional[str] = None
 
 
 # ─── Verification & Audit Models ──────────────────────────────────────────────
@@ -552,6 +553,88 @@ class PerformanceTelemetryModel(BaseModel):
     os_name: Optional[str] = None
     git_commit: Optional[str] = None
     environment_notes: Optional[str] = None
+
+
+# ─── Phase 21 Native Desktop Dialog & System Version Models ──────────────────
+
+class DialogPickRequest(BaseModel):
+    title: Optional[str] = "Select Target"
+    initial_dir: Optional[str] = None
+    file_types: Optional[List[List[str]]] = None
+    path_override: Optional[str] = None  # Automated test / headless bypass
+
+
+class TargetInspectRequest(BaseModel):
+    target_path: str
+
+
+class TargetMetadataModel(BaseModel):
+    path: str
+    type: str  # "FILE", "FOLDER", "DEVICE", "UNKNOWN"
+    exists: bool
+    file_count: int
+    total_size: int
+    readable: bool
+    protected: bool
+    filesystem: str
+    volume: str
+    mtime: Optional[str] = None
+    preflight_hash: Optional[str] = None
+    status: str = "OK"  # "OK", "CANCELLED", "TARGET_NOT_FOUND", "PROTECTED_BLOCKED"
+    message: Optional[str] = None
+
+
+class SystemVersionModel(BaseModel):
+    build_id: str
+    commit: str
+    asset_version: str
+    version: str
+    server_timestamp: str
+    environment: str
+
+
+class TestItemModel(BaseModel):
+    node_id: str
+    module: str
+    class_name: Optional[str] = None
+    name: str
+    category: str
+    status: str
+    duration_seconds: float = 0.0
+    docstring: str = ""
+    markers: List[str] = Field(default_factory=list)
+    last_run_utc: str = ""
+    commit: str = ""
+    traceback: Optional[str] = None
+
+
+class TestCategorySummaryModel(BaseModel):
+    total: int
+    passed: int
+    failed: int
+    errors: int
+    warnings: int
+    desc: str
+
+
+class TestResultsResponseModel(BaseModel):
+    commit: str
+    run_timestamp: str
+    pytest_version: str
+    python_version: str
+    environment: str
+    collected: int
+    passed: int
+    failed: int
+    errors: int
+    skipped: int
+    xfailed: int
+    xpassed: int
+    warnings: int
+    duration_seconds: float
+    categories: Dict[str, TestCategorySummaryModel]
+    tests: List[TestItemModel]
+
 
 
 

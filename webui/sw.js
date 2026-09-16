@@ -1,14 +1,20 @@
 /**
  * DREX-V2 Forensic Progressive Web App (PWA) Service Worker
  * ==========================================================
+ * Version: drex-v2-shell-fbad09d
+ * 
  * Strict Safety & Forensic Integrity Policy:
- * 1. Offline capability is limited to static shell assets and approved non-sensitive cached metadata.
- * 2. Destructive operations (Drive Erasure, File Shredding), live recovery scans, evidence exports,
- *    audit verifications, and live workstation jobs STRICTLY REQUIRE CONNECTIVITY.
- * 3. Offline requests to mutation/live endpoints are intercepted and rejected with 503.
+ * 1. Network-First Strategy: All UI assets (index.html, app.js, styles.css) are fetched
+ *    from the network first to guarantee runtime source truth matching repository HEAD.
+ * 2. Instant Invalidation: On upgrade/new release, old caches are immediately purged and
+ *    the active worker claims clients immediately (skipWaiting + clients.claim).
+ * 3. Offline Safety Gating: Destructive operations (Drive Erasure, File Shredding), live
+ *    recovery scans, evidence exports, and live workstation jobs STRICTLY REQUIRE CONNECTIVITY.
+ *    Offline requests to mutation/live endpoints are intercepted and rejected with 503.
  */
 
-const CACHE_NAME = 'drex-v2-shell-v1';
+const CACHE_VERSION = 'fbad09d';
+const CACHE_NAME = `drex-v2-shell-${CACHE_VERSION}`;
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -26,10 +32,12 @@ const CONNECTIVITY_REQUIRED_PREFIXES = [
   '/api/demo/',
   '/api/auth/',
   '/api/cases',
+  '/api/dialog/',
   '/ws/'
 ];
 
 self.addEventListener('install', (event) => {
+  // Precache shell assets and activate immediately without waiting
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       return cache.addAll(STATIC_ASSETS);
@@ -38,6 +46,7 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
+  // Delete all stale caches from previous commits/releases and claim clients immediately
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
@@ -75,24 +84,48 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 2. Static Assets: Cache-first strategy
-  if (STATIC_ASSETS.includes(url.pathname) || url.pathname.endsWith('.css') || url.pathname.endsWith('.js') || url.pathname.endsWith('.png')) {
+  // 2. Network-First Strategy for application shell assets (app.js, index.html, styles.css)
+  // Ensures updates in source code are served immediately without stale cache persistence
+  if (STATIC_ASSETS.includes(url.pathname) || url.pathname.endsWith('.css') || url.pathname.endsWith('.js') || url.pathname.endsWith('.html') || url.pathname === '/') {
     event.respondWith(
-      caches.match(event.request).then((cachedResponse) => {
-        if (cachedResponse) return cachedResponse;
-        return fetch(event.request).then((networkResponse) => {
-          if (networkResponse && networkResponse.status === 200) {
-            const responseClone = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseClone));
+      fetch(event.request).then((networkResponse) => {
+        if (networkResponse && networkResponse.status === 200) {
+          const responseClone = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseClone));
+        }
+        return networkResponse;
+      }).catch(() => {
+        // Fallback to cache only when offline
+        return caches.match(event.request).then((cachedResponse) => {
+          if (cachedResponse) return cachedResponse;
+          if (event.request.mode === 'navigate') {
+            return caches.match('/index.html');
           }
-          return networkResponse;
+          return new Response('Network error and asset not cached', { status: 408, headers: { 'Content-Type': 'text/plain' } });
         });
       })
     );
     return;
   }
 
-  // 3. General requests: Network first, cache fallback
+  // 3. Static Media/Icons: Cache-first fallback to network
+  if (url.pathname.endsWith('.png') || url.pathname.endsWith('.ico') || url.pathname.endsWith('.svg')) {
+    event.respondWith(
+      caches.match(event.request).then((cached) => {
+        if (cached) return cached;
+        return fetch(event.request).then((res) => {
+          if (res && res.status === 200) {
+            const clone = res.clone();
+            caches.open(CACHE_NAME).then((c) => c.put(event.request, clone));
+          }
+          return res;
+        });
+      })
+    );
+    return;
+  }
+
+  // 4. General API & Other Requests: Network first, cache fallback
   event.respondWith(
     fetch(event.request).catch(() => {
       return caches.match(event.request).then((cached) => {
@@ -100,7 +133,10 @@ self.addEventListener('fetch', (event) => {
         if (event.request.mode === 'navigate') {
           return caches.match('/index.html');
         }
-        return new Response('Offline - resource not available', { status: 503, statusText: 'Offline' });
+        return new Response(JSON.stringify({ error: 'OFFLINE', message: 'Workstation offline' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' }
+        });
       });
     })
   );

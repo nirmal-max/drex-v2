@@ -73,6 +73,10 @@
 
       <!-- Sidebar Bottom Controls -->
       <div class="sidebar-bottom">
+        <div style="padding: 6px 10px; margin-bottom: 8px; background: rgba(0, 122, 255, 0.08); border-radius: 4px; border: 1px solid rgba(0, 122, 255, 0.2);">
+          <div style="font-size: 10px; font-weight: 700; color: var(--drex-text-muted); letter-spacing: 0.05em;">DREX BUILD:</div>
+          <div style="font-family: var(--drex-font-mono); font-size: 11px; font-weight: 700; color: var(--drex-primary);" id="drexBuildCommit">fbad09d</div>
+        </div>
         <div class="system-status">
           <span><i class="dot good"></i> Cryptographic Tripwires: Active</span>
           <span><i class="dot good"></i> Dynamic OS Disk Lock: Active</span>
@@ -115,6 +119,7 @@
 
           <span class="pill status-pill-online" id="statusPill"><i class="dot good"></i> Station Online</span>
           <span class="pill admin-pill" id="elevationPill">🔒 Admin Qualified</span>
+          <span class="pill" style="font-family: var(--drex-font-mono); font-size: 10px; background: var(--drex-bg-surface-subtle); border: 1px solid var(--drex-border-base); color: var(--drex-text-muted);">BUILD: fbad09d</span>
           <button class="icon-button" id="refreshBtn" title="Refresh Live Data">↻</button>
         </div>
       </header>
