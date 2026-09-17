@@ -69,3 +69,10 @@ def backend_status(method_id: str, root: Path, meipass: Path | None = None) -> t
     if found:
         return "BACKEND DETECTED", ", ".join(found)
     return "BACKEND MISSING", "Required official backend executable not found: " + ", ".join(required)
+
+BACKENDS.update({
+    "bleachbit": BackendSpec("bleachbit", "https://github.com/bleachbit/bleachbit", ("bleachbit.py", "bleachbit.exe"), "GPLv3"),
+    "eraser": BackendSpec("eraser", "https://github.com/Eraser/eraser", ("Eraser.exe",), "GPLv3"),
+    "drivewipe": BackendSpec("drivewipe", "https://github.com/KodyDennon/DriveWipe", ("drivewipe-cli.exe", "drivewipe-cli"), "GPLv3"),
+    "nvme-cli": BackendSpec("nvme-cli", "https://github.com/linux-nvme/nvme-cli", ("nvme.exe", "nvme"), "GPLv2"),
+})

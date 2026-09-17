@@ -559,9 +559,10 @@ class FilesystemRecoveryAdapter(BaseRecoveryAdapter):
 class DeepRecoveryAdapter(BaseRecoveryAdapter):
     """Method 21: Unallocated file carving via PhotoRec and native DeepCarverEngine."""
 
-    def scan(self, source: str, cancel: Callable[[], bool] | None = None, timeout: int = 86400) -> RecoveryScan:
+    def scan(self, source: str | RecoveryTarget, cancel: Callable[[], bool] | None = None, timeout: int = 86400) -> RecoveryScan:
         self.validate_source(source)
-        src_path = Path(source)
+        source_str = source.path if isinstance(source, RecoveryTarget) else str(source)
+        src_path = Path(source_str)
         
         # If source is a raw image/dump file, execute DeepCarverEngine directly
         if src_path.is_file():
@@ -612,9 +613,10 @@ class DeepRecoveryAdapter(BaseRecoveryAdapter):
             backend="PhotoRec 7.2",
         )
 
-    def recover(self, source: str, candidate_id: str, destination: Path, timeout: int = 86400) -> list[Path]:
+    def recover(self, source: str | RecoveryTarget, candidate_id: str, destination: Path, timeout: int = 86400) -> list[Path]:
         self.validate_source(source)
-        src_path = Path(source)
+        source_str = source.path if isinstance(source, RecoveryTarget) else str(source)
+        src_path = Path(source_str)
         
         # If recovering a candidate discovered by DeepCarverEngine from a raw image
         if src_path.is_file() and candidate_id.startswith("CARVE-"):
@@ -636,7 +638,7 @@ class DeepRecoveryAdapter(BaseRecoveryAdapter):
             raise RecoveryError(f"Deep Recovery requires PhotoRec. {self.unavailable_reason}")
         from backend_adapters import build_photorec_command, CentralProcessRunner
         destination.mkdir(parents=True, exist_ok=True)
-        cmd = build_photorec_command(photorec, source, str(destination))
+        cmd = build_photorec_command(photorec, source_str, str(destination))
         res = CentralProcessRunner.run(cmd, timeout=timeout)
 
         # photorec_win.exe embeds requestedExecutionLevel=highestAvailable.
@@ -1374,8 +1376,23 @@ class ForensicRecoveryAdapter(BaseRecoveryAdapter):
     _GENESIS_HASH = "0" * 64  # Fixed genesis value for the first entry
 
     def scan(self, source: str, cancel: Callable[[], bool] | None = None, timeout: int = 86400) -> RecoveryScan:
-        quick = QuickRecoveryAdapter(self.root, self.meipass)
-        return quick.scan(source, cancel=cancel, timeout=timeout)
+        try:
+            quick = QuickRecoveryAdapter(self.root, self.meipass)
+            res = quick.scan(source, cancel=cancel, timeout=timeout)
+            return RecoveryScan(
+                status=res.status,
+                message=f"Method M25 (Forensic Recovery): Discovered {len(res.candidates)} candidate(s) with SHA-256 ledger binding.",
+                source=res.source,
+                candidates=res.candidates,
+                warnings=res.warnings,
+                raw=res.raw,
+                backend="TSK 4.15.0 + M25 Forensic Ledger Engine",
+            )
+        except RecoveryError as exc:
+            raise RecoveryError(f"M25 Forensic Recovery -> Quick Recovery sub-stage failed: {exc}") from exc
+        except Exception as exc:
+            raise RecoveryError(f"M25 Forensic Recovery -> Quick Recovery sub-stage failed: {exc}") from exc
+
 
     @staticmethod
     def _entry_payload(entry: dict[str, Any]) -> str:

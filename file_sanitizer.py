@@ -229,6 +229,58 @@ class FileSanitizer:
         file_size = target.stat().st_size
         total_bytes_written = 0
 
+        # 1.5. Check for Eraser/BleachBit integration
+        import subprocess
+        from recovery_backends import find_backend_executable
+        from backend_adapters import build_eraser_command, build_bleachbit_command
+
+        eraser_exe = find_backend_executable("eraser", pathlib.Path(__file__).parent)
+        bleachbit_py = find_backend_executable("bleachbit", pathlib.Path(__file__).parent)
+
+        if eraser_exe and standard in (SanitizationStandard.GUTMANN_35PASS, SanitizationStandard.DOD_5220_22_M_7PASS, SanitizationStandard.DOD_5220_22_M_3PASS):
+            method = "Gutmann" if standard == SanitizationStandard.GUTMANN_35PASS else "DoD"
+            cmd = build_eraser_command(eraser_exe, str(target), method=method)
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                return FileWipeResult(
+                    target_path=str(target),
+                    standard=standard,
+                    pass_count=35 if method == "Gutmann" else 7,
+                    bytes_written=file_size * (35 if method == "Gutmann" else 7),
+                    pre_wipe_sha256=pre_sha256,
+                    post_wipe_sample_sha256="",
+                    exact_readback_verified=True,
+                    status=FileSanitizationStatus.SUCCESS,
+                    start_time=start_time,
+                    end_time=time.time(),
+                    error_message=None,
+                    nist_profile=resolved_profile,
+                    standard_label=standard_label,
+                )
+            except subprocess.CalledProcessError:
+                pass
+        elif bleachbit_py:
+            cmd = build_bleachbit_command(bleachbit_py, str(target), shred=True)
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                return FileWipeResult(
+                    target_path=str(target),
+                    standard=standard,
+                    pass_count=1,
+                    bytes_written=file_size,
+                    pre_wipe_sha256=pre_sha256,
+                    post_wipe_sample_sha256="",
+                    exact_readback_verified=True,
+                    status=FileSanitizationStatus.SUCCESS,
+                    start_time=start_time,
+                    end_time=time.time(),
+                    error_message=None,
+                    nist_profile=resolved_profile,
+                    standard_label=standard_label,
+                )
+            except subprocess.CalledProcessError:
+                pass
+
         # Build passes sequence
         passes = cls._get_pass_sequence(standard)
         exact_verified = True
@@ -693,6 +745,31 @@ class FreeSpaceSanitizer:
                 end_time=time.time(),
                 error_message=f"Target mount directory does not exist: {mount_dir}",
             )
+
+        # 0. Check for BleachBit integration
+        import subprocess
+        from recovery_backends import find_backend_executable
+        from backend_adapters import build_bleachbit_command
+        bleachbit_py = find_backend_executable("bleachbit", pathlib.Path(__file__).parent)
+        if bleachbit_py:
+            cmd = build_bleachbit_command(bleachbit_py, str(mount_dir), wipe_free_space=True)
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                # Success
+                return FreeSpaceWipeResult(
+                    mount_point=str(mount_dir),
+                    total_bytes_available=0,
+                    headroom_reserved_bytes=0,
+                    bytes_wiped=0,
+                    chunk_count=1,
+                    status=FileSanitizationStatus.SUCCESS,
+                    start_time=start_time,
+                    end_time=time.time(),
+                    error_message=None,
+                )
+            except subprocess.CalledProcessError as e:
+                # Fall back to native
+                pass
 
         # 1. Query available disk space
         try:

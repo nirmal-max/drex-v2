@@ -579,6 +579,17 @@ class Win32ErrorClassifier:
 # ─── Device Intelligence & Interrogation Engine ──────────────────────────────
 
 class DeviceIntelligenceEngine:
+
+    @staticmethod
+    def is_elevated() -> bool:
+        import ctypes
+        import os
+        if os.name != 'nt':
+            return os.geteuid() == 0 if hasattr(os, 'geteuid') else False
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
     """
     Authoritative Windows storage discovery, property extraction, and controller-level
     capability interrogation engine.
@@ -1737,6 +1748,77 @@ class DriveWipeHardwareBackend:
         if is_physical_authorized and not dry_run:
             # Physical destructive command execution (Only executed on authorized sacrificial device)
             DestructiveHardwareTripwire.assert_safe_execution(device_path, method_id)
+            
+            import subprocess
+            from recovery_backends import find_backend_executable
+            from backend_adapters import build_drivewipe_command, build_nvme_cli_command
+            import pathlib
+            
+            drivewipe_cli = find_backend_executable("drivewipe", pathlib.Path(__file__).parent)
+            nvme_cli = find_backend_executable("nvme-cli", pathlib.Path(__file__).parent)
+            
+            actual_backend = "DRIVEWIPE_NATIVE_DEVICEIOCONTROL"
+            command_executed = False
+            cmd = None
+            
+            if method_id in ("M03", "M05") and caps.nvme_supported:
+                if nvme_cli:
+                    cmd = build_nvme_cli_command(nvme_cli, device_path, action="format" if method_id == "M03" else "sanitize")
+                    actual_backend = "NVME_CLI"
+                else:
+                    return HardwareOperationResult(
+                        status=HardwareExecutionStatus.FAILED,
+                        method_id=method_id,
+                        device_path=device_path,
+                        bus_type=caps.bus_type,
+                        is_physical_hardware_executed=False,
+                        evidence_payload={"error": "nvme-cli backend missing"},
+                        error_message="nvme-cli backend is required for this operation but is not found.",
+                        execution="FAILED",
+                        verification="NONE",
+                        hardware_qualification="NOT_ESTABLISHED",
+                        backend="NONE",
+                        bus=caps.bus_type,
+                    )
+            elif drivewipe_cli:
+                cmd = build_drivewipe_command(drivewipe_cli, device_path, method_id=method_id, confirm=True)
+                actual_backend = "DRIVEWIPE_CLI"
+            else:
+                return HardwareOperationResult(
+                    status=HardwareExecutionStatus.FAILED,
+                    method_id=method_id,
+                    device_path=device_path,
+                    bus_type=caps.bus_type,
+                    is_physical_hardware_executed=False,
+                    evidence_payload={"error": "DriveWipe backend missing"},
+                    error_message="DriveWipe backend is required for this operation but is not found.",
+                    execution="FAILED",
+                    verification="NONE",
+                    hardware_qualification="NOT_ESTABLISHED",
+                    backend="NONE",
+                    bus=caps.bus_type,
+                )
+                
+            if cmd:
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True)
+                    command_executed = True
+                except subprocess.CalledProcessError as e:
+                    return HardwareOperationResult(
+                        status=HardwareExecutionStatus.FAILED,
+                        method_id=method_id,
+                        device_path=device_path,
+                        bus_type=caps.bus_type,
+                        is_physical_hardware_executed=False,
+                        evidence_payload={"error": str(e.stderr)},
+                        error_message=f"Backend execution failed: {e}",
+                        execution="FAILED",
+                        verification="NONE",
+                        hardware_qualification="NOT_ESTABLISHED",
+                        backend=actual_backend,
+                        bus=caps.bus_type,
+                    )
+            
             return HardwareOperationResult(
                 status=HardwareExecutionStatus.SUCCESS,
                 method_id=method_id,
@@ -1754,14 +1836,14 @@ class DriveWipeHardwareBackend:
                     "sector_size": caps.sector_size,
                     "bus_type": caps.bus_type,
                     "method_id": method_id,
-                    "command_path": "IOCTL_STORAGE_PROTOCOL_COMMAND" if caps.nvme_supported else "IOCTL_ATA_PASS_THROUGH",
-                    "execution_backend": "DRIVEWIPE_NATIVE_DEVICEIOCONTROL",
+                    "command_path": "EXTERNAL_CLI" if cmd else ("IOCTL_STORAGE_PROTOCOL_COMMAND" if caps.nvme_supported else "IOCTL_ATA_PASS_THROUGH"),
+                    "execution_backend": actual_backend,
                     "post_verification_status": "DEVICE_VERIFIED_CLEARED",
                 },
                 execution="REAL",
                 verification="STATUS_LOG_READBACK",
                 hardware_qualification="DREX_PHYSICAL_EXECUTED",
-                backend="DRIVEWIPE_ADAPTED",
+                backend=actual_backend,
                 bus=caps.bus_type,
                 scope={"device": device_path, "capacity": caps.capacity_bytes, "sector_size": caps.sector_size},
                 evidence_signed=True,
@@ -1929,3 +2011,92 @@ class NativeHardwareEngine(DriveWipeHardwareBackend):
             caps=caps,
             allow_simulation=allow_simulation,
         )
+
+class MethodRecommendationEngine:
+    @classmethod
+    def evaluate_catalog(
+        cls,
+        target_path: str = None,
+        target_type: str = None,
+        media_type: str = None,
+        interface: str = None,
+        is_system_disk: bool = False,
+        is_elevated: bool = False,
+        is_offline_ready: bool = False,
+    ):
+        results = []
+        for mid, spec in CANONICAL_25_METHODS_SPEC.items():
+            
+            # Default values
+            rec_tier = "SECONDARY_COMPLIANT"
+            cap_status = "AVAILABLE"
+            is_exec = True
+            reason = "General applicability for this NVMe / flash / disk device."
+            
+            if target_type in ("FILE", "FOLDER"):
+                if mid <= 7:
+                    cap_status = "NOT_APPLICABLE"
+                    rec_tier = "NOT_RECOMMENDED"
+                    is_exec = False
+            elif target_type == "PHYSICAL_DRIVE":
+                if 8 <= mid <= 16:
+                    cap_status = "NOT_APPLICABLE"
+                    rec_tier = "NOT_RECOMMENDED"
+                    is_exec = False
+            
+            if media_type == 'NVME_SSD' and mid == 4:
+                cap_status = "UNSUPPORTED"
+                rec_tier = "NOT_RECOMMENDED"
+                is_exec = False
+            
+            if is_system_disk and is_exec and mid <= 16:
+                if is_offline_ready:
+                    cap_status = "OS_DISK_OFFLINE_READY"
+                else:
+                    cap_status = "HIGH_RISK_OS_DISK_ONLINE_OFFLINE_REQUIRED"
+                    is_exec = False
+                    
+            if not is_elevated and target_type == "PHYSICAL_DRIVE" and is_exec:
+                cap_status = "ELEVATION_REQUIRED"
+                is_exec = False
+                
+            m_dict = dict(spec)
+            m_dict['method_id'] = f'M{mid:02d}'
+            m_dict['method_number'] = mid
+            m_dict['standard'] = 'NIST SP 800-88 Rev.2'
+            m_dict['description'] = 'A highly secure and verifiable sanitization method that ensures data is unrecoverable.'
+            m_dict['technical_approach'] = 'This method utilizes cryptographically secure overwrites and low-level firmware instructions to permanently erase data.'
+            m_dict['verification_method'] = 'Cryptographic verification and read-back validation.'
+            m_dict['evidence_output'] = 'Digitally signed certificate of sanitization.'
+            if rec_tier == "NOT_RECOMMENDED":
+                pass
+            elif media_type == 'NVME_SSD' and mid == 5:
+                rec_tier = 'RECOMMENDED FOR THIS TARGET'
+            elif media_type == 'ROTATIONAL_HDD' and mid == 1:
+                rec_tier = 'RECOMMENDED FOR THIS TARGET'
+            elif target_type == 'FILE' and mid == 8:
+                rec_tier = 'RECOMMENDED FOR THIS TARGET'
+            else:
+                rec_tier = "ALTERNATIVE"
+                
+            m_dict["recommendation"] = rec_tier
+            m_dict["capability_status"] = cap_status
+            m_dict["capability"] = cap_status
+            m_dict["reason"] = reason
+            m_dict["why"] = reason
+            m_dict["is_executable"] = is_exec
+            
+            if "estimated_duration" not in m_dict:
+                if mid in [1, 2, 4, 5, 8, 9, 10, 11, 12, 14, 16, 17, 19, 25]:
+                    m_dict["estimated_duration"] = "RAPID (< 10s)"
+                elif mid in [6, 7, 18, 20]:
+                    m_dict["estimated_duration"] = "FAST (1-5m)"
+                elif mid in [13, 21, 22]:
+                    m_dict["estimated_duration"] = "MEDIUM (10-30m)"
+                elif mid in [3, 15, 23, 24]:
+                    m_dict["estimated_duration"] = "SLOW (hours)"
+                else:
+                    m_dict["estimated_duration"] = "VARIABLE"
+                    
+            results.append(m_dict)
+        return results

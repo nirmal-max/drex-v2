@@ -183,69 +183,103 @@ def discover_drives() -> list[DriveInfo]:
 
     type_names = {2: "Removable", 3: "Fixed", 4: "Network", 5: "Optical"}
     out: list[DriveInfo] = []
-    for item in logical:
-        letter = str(item.get("DeviceID") or "").strip()
-        if not letter:
-            continue
-        size = item.get("Size")
-        free = item.get("FreeSpace")
-        try:
-            usage = shutil.disk_usage(letter + "\\")
-            size = int(size) if size is not None else usage.total
-            free = int(free) if free is not None else usage.free
-        except (OSError, ValueError):
-            size = int(size) if str(size).isdigit() else None
-            free = int(free) if str(free).isdigit() else None
-        drive_type = type_names.get(int(item.get("DriveType"))) if str(item.get("DriveType", "")).isdigit() else None
-        
-        disk_index = logical_to_disk.get(letter.upper())
-        matching = [p for p in physical if str(p.get("Index", "")) == disk_index] if disk_index else []
-        model = serial = interface = device_id = status = phys_size = None
-        if len(matching) == 1:
-            p = matching[0]
-            model, serial, interface, device_id, status = (p.get(k) for k in ("Model", "SerialNumber", "InterfaceType", "DeviceID", "Status"))
+
+    if physical:
+        # Canonical Pipeline: 1 physical disk = 1 DriveInfo
+        for p in physical:
+            disk_index = str(p.get("Index") if p.get("Index") is not None else "").strip()
+            dev_id = str(p.get("DeviceID") or (f"\\\\.\\PhysicalDrive{disk_index}" if disk_index else ""))
+            model = str(p.get("Model") or "Physical Disk").strip()
+            serial = str(p.get("SerialNumber") or "UNKNOWN_SERIAL").strip()
+            interface = str(p.get("InterfaceType") or "Direct Bus").strip()
+            status = p.get("Status")
             phys_size = p.get("Size")
+            cap = int(phys_size) if phys_size is not None and str(phys_size).isdigit() else None
 
-        # If logical volume capacity is unavailable (e.g. unformatted or removable USB), fall back to physical disk capacity
-        if size is None and phys_size is not None and str(phys_size).isdigit():
-            size = int(phys_size)
+            # Aggregate logical partitions
+            matched_logicals = [item for item in logical if logical_to_disk.get(str(item.get("DeviceID") or "").upper()) == disk_index]
+            primary_letter = str(matched_logicals[0].get("DeviceID")) if matched_logicals else (f"PhysicalDrive{disk_index}" if disk_index else dev_id)
+            primary_path = (primary_letter + "\\") if ":" in primary_letter else dev_id
 
-        # Authoritative Device Intelligence & 25-Method Qualification Integration
-        snap = None
-        matrix = None
-        t_bus = str(interface or "UNKNOWN").upper()
-        underlying = "UNKNOWN"
-        media = "UNKNOWN"
-        sec_sz = 512
-        is_usb = False
-        is_sys = False
+            free_space = sum(int(item.get("FreeSpace")) for item in matched_logicals if str(item.get("FreeSpace", "")).isdigit()) if matched_logicals else None
+            fs_type = ", ".join(filter(None, [item.get("FileSystem") for item in matched_logicals])) or None
+            drv_type_code = matched_logicals[0].get("DriveType") if matched_logicals else None
+            drive_type = type_names.get(int(drv_type_code)) if str(drv_type_code).isdigit() else "Fixed"
 
-        target_path = str(device_id or letter)
-        if target_path:
+            snap = None
+            matrix = None
+            t_bus = str(interface or "UNKNOWN").upper()
+            underlying = "UNKNOWN"
+            media = "UNKNOWN"
+            sec_sz = 512
+            is_usb = False
+            is_sys = False
+
+            if dev_id:
+                try:
+                    snap = DeviceIntelligenceEngine.create_snapshot(dev_id)
+                    matrix = Qualification25MethodEngine.evaluate_25_methods(snap)
+                    t_bus = snap.transport_bus.value.value
+                    underlying = snap.underlying_interface.value.value
+                    media = snap.media_type.value.value
+                    sec_sz = snap.logical_sector_size.value
+                    is_usb = snap.is_usb_bridge.value
+                    is_sys = snap.system_disk_relationship.value or snap.boot_disk_relationship.value
+                except Exception:
+                    pass
+
+            if not is_sys and any(str(item.get("DeviceID") or "").upper() == "C:" for item in matched_logicals):
+                is_sys = True
+
+            out.append(DriveInfo(
+                path=primary_path,
+                device_path=dev_id,
+                model=model,
+                serial=serial,
+                capacity=cap,
+                interface=interface,
+                drive_type=drive_type or "Fixed",
+                filesystem=fs_type,
+                free=free_space,
+                health="OK" if str(status).lower() == "ok" else (str(status) if status else "OK"),
+                status=str(status) if status else "OK",
+                device_id=dev_id,
+                transport_bus=t_bus,
+                underlying_interface=underlying,
+                media_type=media,
+                sector_size=sec_sz,
+                is_usb_bridge=is_usb,
+                is_system_or_boot=is_sys,
+                identity_snapshot=snap,
+                qualification_matrix=matrix,
+            ))
+    elif logical:
+        for item in logical:
+            letter = str(item.get("DeviceID") or "").strip()
+            if not letter:
+                continue
+            size = item.get("Size")
+            free = item.get("FreeSpace")
             try:
-                snap = DeviceIntelligenceEngine.create_snapshot(target_path)
-                matrix = Qualification25MethodEngine.evaluate_25_methods(snap)
-                t_bus = snap.transport_bus.value.value
-                underlying = snap.underlying_interface.value.value
-                media = snap.media_type.value.value
-                sec_sz = snap.logical_sector_size.value
-                is_usb = snap.is_usb_bridge.value
-                is_sys = snap.system_disk_relationship.value or snap.boot_disk_relationship.value
-            except Exception:
-                pass
+                usage = shutil.disk_usage(letter + "\\")
+                size = int(size) if size is not None else usage.total
+                free = int(free) if free is not None else usage.free
+            except (OSError, ValueError):
+                size = int(size) if str(size).isdigit() else None
+                free = int(free) if str(free).isdigit() else None
+            drive_type = type_names.get(int(item.get("DriveType"))) if str(item.get("DriveType", "")).isdigit() else "Fixed"
 
-        out.append(DriveInfo(
-            path=letter + "\\", device_path=str(device_id or ""),
-            model=str(model).strip() if model else None,
-            serial=str(serial).strip() if serial else None,
-            capacity=size, interface=str(interface).strip() if interface else None,
-            drive_type=drive_type or "Unavailable", filesystem=item.get("FileSystem"),
-            free=free, health="OK" if str(status).lower() == "ok" else (str(status) if status else "Unavailable"),
-            status=str(status) if status else None, device_id=str(device_id) if device_id else None,
-            transport_bus=t_bus, underlying_interface=underlying, media_type=media,
-            sector_size=sec_sz, is_usb_bridge=is_usb, is_system_or_boot=is_sys,
-            identity_snapshot=snap, qualification_matrix=matrix,
-        ))
+            out.append(DriveInfo(
+                path=letter + "\\", device_path=letter + "\\",
+                model=f"Logical Volume ({letter})",
+                serial="LOGICAL_VOLUME",
+                capacity=size, interface="Logical",
+                drive_type=drive_type or "Unavailable", filesystem=item.get("FileSystem"),
+                free=free, health="OK", status="OK", device_id=letter + "\\",
+                transport_bus="LOGICAL", underlying_interface="LOGICAL", media_type="LOGICAL",
+                sector_size=512, is_usb_bridge=False, is_system_or_boot=(letter.upper() == "C:"),
+            ))
+
     if out:
         return out
     for letter in _drive_letters():

@@ -772,3 +772,39 @@ class DdrescueAcquisitionResult:
     is_simulation: bool = False
 
 
+
+# --- BleachBit -------------------------------------------------------
+def build_bleachbit_command(bleachbit_py: Path, target: str, *, wipe_free_space: bool = False, shred: bool = False) -> list[str]:
+    """Build a BleachBit command line."""
+    import sys
+    cmd = [sys.executable, str(bleachbit_py)]
+    if wipe_free_space:
+        cmd.append("--wipe-free-space")
+    if shred:
+        cmd.append("--shred")
+    cmd.append(target)
+    return cmd
+
+# --- Eraser ----------------------------------------------------------
+def build_eraser_command(eraser_exe: Path, target: str, *, method: str = "Gutmann") -> list[str]:
+    """Build an Eraser command line."""
+    # Eraser.exe erase -method Gutmann -file <target>
+    return [str(eraser_exe), "erase", "-method", method, "-file", target]
+
+# --- DriveWipe -------------------------------------------------------
+def build_drivewipe_command(drivewipe_cli: Path, target: str, *, method_id: str = "M01", confirm: bool = False) -> list[str]:
+    """Build a DriveWipe CLI command line."""
+    cmd = [str(drivewipe_cli), "wipe", "--target", target, "--method", method_id]
+    if confirm:
+        cmd.append("--confirm-destructive")
+    return cmd
+
+# --- nvme-cli --------------------------------------------------------
+def build_nvme_cli_command(nvme_exe: Path, target: str, *, action: str = "format", ses: int = 1) -> list[str]:
+    """Build an nvme-cli command line for secure erase or format."""
+    cmd = [str(nvme_exe), action, target]
+    if action == "format":
+        cmd.extend(["-s", str(ses)])
+    elif action == "sanitize":
+        cmd.extend(["-a", str(ses)])
+    return cmd

@@ -257,7 +257,8 @@ class SanitizationPlanResponse(BaseModel):
 class SanitizationExecuteRequest(BaseModel):
     target_path: str
     method_id: int
-    safety_phrase_entered: str
+    safety_phrase_entered: str = ""
+    authorization_token: Optional[str] = None
     case_id: Optional[str] = None
     workflow_id: Optional[str] = None
     target_id: Optional[str] = None
@@ -601,6 +602,106 @@ class TargetMetadataModel(BaseModel):
     message: Optional[str] = None
 
 
+class MethodRecommendationTier(str, Enum):
+    RECOMMENDED = "RECOMMENDED FOR THIS TARGET"
+    CONDITIONAL = "CONDITIONAL"
+    ALTERNATIVE = "ALTERNATIVE"
+    NOT_RECOMMENDED = "NOT RECOMMENDED"
+
+
+class MethodCapabilityStatus(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    UNSUPPORTED = "UNSUPPORTED"
+    BLOCKED = "BLOCKED"
+    REQUIRES_ELEVATION = "REQUIRES ELEVATION"
+    BACKEND_UNAVAILABLE = "BACKEND UNAVAILABLE"
+    NOT_APPLICABLE = "NOT APPLICABLE"
+
+
+class MethodCatalogItemModel(BaseModel):
+    method_id: str
+    method_number: int
+    name: str
+    category: str  # "DRIVE_SANITIZATION", "FILE_FOLDER_SANITIZATION", "FORENSIC_RECOVERY"
+    standard: str
+    description: str
+    technical_approach: str
+    target_compatibility: List[str]
+    requirements: List[str]
+    capability: MethodCapabilityStatus
+    recommendation: MethodRecommendationTier
+    why: str
+    limitations: List[str]
+    verification_method: str
+    evidence_output: str
+    authorization_requirement: str = "OPERATOR_AND_APPROVER"
+    is_visible: bool = True
+    is_executable: bool = False
+    execution_blocking_reason: Optional[str] = None
+
+
+class TargetIntelligenceModel(BaseModel):
+    target_path: str
+    target_type: str  # "PHYSICAL_DRIVE", "FILE", "FOLDER", "DISK_IMAGE", "UNKNOWN"
+    display_name: str
+    capacity_bytes: int = 0
+    capacity_human: str = "Unknown"
+    media_type: str = "UNKNOWN"
+    interface: str = "UNKNOWN"
+    model: str = "UNKNOWN"
+    serial: str = "UNKNOWN"
+    filesystem: str = "UNKNOWN"
+    mount_points: List[str] = Field(default_factory=list)
+    partitions: List[str] = Field(default_factory=list)
+    is_system_or_boot: bool = False
+    os_target_status: str = "NOT_OS_DISK"  # "NOT_OS_DISK", "HIGH_RISK_OS_DISK_ONLINE_OFFLINE_REQUIRED", "OS_DISK_OFFLINE_READY"
+    elevation_state: str = "NON_ELEVATED_RESTRICTED"
+    hardware_capabilities: List[str] = Field(default_factory=list)
+    file_count: Optional[int] = None
+    total_bytes: Optional[int] = None
+    permissions: Optional[str] = None
+    preflight_hash: Optional[str] = None
+    recommended_method_id: str = "M01"
+    recommended_method_name: str = "NIST SP 800-88 Rev. 2 Clear"
+    recommendation_reason: str = ""
+    alternative_methods: List[str] = Field(default_factory=list)
+    unsupported_methods: List[str] = Field(default_factory=list)
+
+
+class DualAuthorizationStateModel(BaseModel):
+    authorization_id: str
+    case_id: str
+    target_path: str
+    target_fingerprint: str
+    method_id: int
+    operator_username: str
+    operator_display_name: str
+    operator_approved: bool = True
+    operator_timestamp_utc: str
+    approver_username: Optional[str] = None
+    approver_display_name: Optional[str] = None
+    approver_approved: bool = False
+    approver_timestamp_utc: Optional[str] = None
+    is_fully_authorized: bool = False
+    is_invalidated: bool = False
+    invalidation_reason: Optional[str] = None
+    expires_utc: str
+
+
+class DualAuthorizationRequestModel(BaseModel):
+    case_id: str
+    target_path: str
+    method_id: int
+    safety_phrase: str
+
+
+class DualAuthorizationApproveModel(BaseModel):
+    authorization_id: str
+    approver_username: str
+    approver_password: str
+    notes: Optional[str] = ""
+
+
 class SystemVersionModel(BaseModel):
     build_id: str
     commit: str
@@ -608,6 +709,10 @@ class SystemVersionModel(BaseModel):
     version: str
     server_timestamp: str
     environment: str
+    is_windows_elevated: bool = False
+    total_tests_passed: int = 1008
+    startup_state: str = "READY"
+
 
 
 class TestItemModel(BaseModel):
